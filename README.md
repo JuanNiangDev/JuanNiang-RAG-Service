@@ -11,7 +11,7 @@ JuanNiang-Neo 的 RAG 检索服务：**tag（uuid）↔ 向量** 的存储与检
 
 ## 构建
 
-前置：Rust 工具链、CMake + C++ 编译器、OpenBLAS（`sudo apt install cmake g++ libopenblas-dev`）。
+前置：Rust 工具链、CMake + make、C++ 编译器、OpenBLAS、libclang（`sudo apt install cmake make g++ libopenblas-dev libclang-dev`）。
 
 ```sh
 # 1. 获取模型（自动下载 bge-small-zh-v1.5 Q8_0 GGUF，~25MB，魔搭社区）

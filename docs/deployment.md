@@ -14,7 +14,7 @@
 # 1. 获取模型（自动下载到 models/）
 make download
 
-# 2. 编译（首次 5–20 分钟，需 cmake/g++/libopenblas-dev）
+# 2. 编译（首次 5–20 分钟，需 cmake/make/g++/libopenblas-dev/libclang-dev）
 make build-release
 
 # 3. 启动（默认 127.0.0.1:3000）

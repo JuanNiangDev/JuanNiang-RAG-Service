@@ -8,14 +8,16 @@
 |---|---|---|
 | Rust 工具链 | 1.85+（edition 2024） | 编译 |
 | CMake | 任意现代版本 | 编译 llama.cpp（构建脚本调用） |
+| make | 任意 | cmake 默认 "Unix Makefiles" 生成器依赖（`make`） |
 | C++ 编译器（g++） | 支持 C++17 | 编译 llama.cpp |
 | OpenBLAS 开发库 | 任意 | llama.cpp 矩阵乘法加速（`libopenblas-dev`） |
+| libclang 开发库 | 任意 | llama-cpp-sys-2 构建时用 bindgen 生成 FFI 绑定（`libclang-dev`） |
 | 模型文件 | bge-small-zh-v1.5 Q8_0 GGUF（~25MB） | 运行时必需（`make download` 自动获取） |
 
 Debian/Ubuntu 一键安装系统依赖：
 
 ```sh
-sudo apt install cmake g++ libopenblas-dev
+sudo apt install cmake make g++ libopenblas-dev libclang-dev
 ```
 
 获取模型（两种方式任选）：

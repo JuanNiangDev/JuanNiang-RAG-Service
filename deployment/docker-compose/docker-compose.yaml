@@ -12,10 +12,7 @@
 
 services:
   rag-service:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: rag-service:latest
+    image: ghcr.io/juanniangdev/juan-rag:v1.0.0_beta
     container_name: rag-service
     restart: unless-stopped
     ports:
