@@ -2,13 +2,15 @@ openapi: 3.0.3
 info:
   title: JuanNiang-RAG-Service API
   description: |
-    tag（uuid）↔ 向量 的存储与检索服务，供主 Agent 通过 HTTP 调用。
+    scoop（分库）+ tag（uuid）↔ 向量 的存储与检索服务，供主 Agent 通过 HTTP 调用。
 
+    - scoop 白名单：`knowledge` / `memory` / `groupmgr` / `plugin`；检索只在目标分库内进行
     - 原始文档与 uuid 由 Agent 保管，本服务只做向量化、检索与删除
     - 长文本服务端自动分块，Agent 契约始终为 tag ↔ 全文
+    - 同一 tag 全局唯一归属一个分库，跨分库写入/删除 → 409
     - 查询与写入互不阻塞；写接口返回即持久化完成（读己之写）
     - 分数 `score` 为相似度（0~1），越高越相似
-  version: 1.0.0
+  version: 2.0.0
   contact:
     name: JuanNiang-Neo
   license:
@@ -22,22 +24,24 @@ servers:
 security: []
 
 tags:
-  - name: tags
-    description: tag ↔ 向量 的写入与检索
+  - name: scoops
+    description: scoop 分库内 tag ↔ 向量 的写入与检索
   - name: ops
     description: 运维与诊断
 
 paths:
-  /tags/{tag}:
+  /scoops/{scoop}/tags/{tag}:
     parameters:
+      - $ref: '#/components/parameters/ScoopPath'
       - $ref: '#/components/parameters/TagPath'
     put:
-      tags: [tags]
+      tags: [scoops]
       summary: 更新（upsert）
       description: |
-        tag 已存在则覆写其全部向量，不存在则新建。
+        tag 已存在则覆写其全部向量，不存在则新建（写入 scoop 分库）。
         长文（>512 token）服务端自动分块，全部块向量挂同一 tag；
         响应返回时数据已持久化并发布，之后检索立即可见。
+        同一 tag 已归属其他分库时返回 409。
       operationId: upsertTag
       requestBody:
         required: true
@@ -53,17 +57,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/UpsertResponse'
               example:
+                scoop: knowledge
                 tag: 3af2b489-b13a-42e4-af98-fe89d0e6b00e
                 chunk_count: 4
                 truncated: false
         '400':
           $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
     delete:
-      tags: [tags]
+      tags: [scoops]
       summary: 删除
-      description: 删除 tag 及其全部块向量。
+      description: 删除 tag 及其全部块向量（只能删除属于该 scoop 的 tag）。
       operationId: deleteTag
       responses:
         '200':
@@ -80,19 +87,26 @@ paths:
                     description: 被删除的 tag
               example:
                 deleted: 3af2b489-b13a-42e4-af98-fe89d0e6b00e
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /tags/batch:
+  /scoops/{scoop}/tags/batch:
     post:
-      tags: [tags]
+      tags: [scoops]
       summary: 批量更新
       description: |
         多条文本一次批量 upsert：一次嵌入推理 + 一次发布 + 一次持久化，
-        批量成本远低于逐条调用。逐条返回结果，单条失败不影响其他条目。
+        批量成本远低于逐条调用。全部条目必须隶属同一个 scoop。
+        逐条返回结果，单条失败（如归属冲突）不影响其他条目。
       operationId: batchUpsert
+      parameters:
+        - $ref: '#/components/parameters/ScoopPath'
       requestBody:
         required: true
         content:
@@ -107,7 +121,7 @@ paths:
                   text: 第二条文本
       responses:
         '200':
-          description: 批量处理完成（含逐条结果）
+          description: 批量处理完成（含逐条结果，顺序与请求一致）
           content:
             application/json:
               schema:
@@ -117,16 +131,18 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /tags/search:
+  /scoops/{scoop}/tags/search:
     get:
-      tags: [tags]
+      tags: [scoops]
       summary: 检索
       description: |
-        输入文本，返回按相似度排序的 tag 列表。
+        输入文本，返回按相似度排序的 tag 列表；只在指定 scoop 分库内检索，
+        其他分库的向量不参与。
         块级命中去重聚合（每 tag 取最高分）；查询文本自动加 bge 指令前缀；
         相同 `q` 短时间重复查询命中 LRU 缓存（免推理）。
       operationId: searchTags
       parameters:
+        - $ref: '#/components/parameters/ScoopPath'
         - name: q
           in: query
           required: true
@@ -183,15 +199,18 @@ paths:
                 $ref: '#/components/schemas/HealthResponse'
               example:
                 status: ok
-                tags: 128
-                chunks: 340
+                scoops:
+                  knowledge: { tags: 128, chunks: 340 }
+                  memory: { tags: 56, chunks: 60 }
+                  groupmgr: { tags: 2300, chunks: 2300 }
+                  plugin: { tags: 0, chunks: 0 }
 
   /info:
     get:
       tags: [ops]
       summary: 服务信息
       description: |
-        embedding 模型状态 + 进程内存 + 向量规模。
+        embedding 模型状态 + 进程内存 + 各分库规模。
         `model.ready=false` 时查看 `model.error` 获取加载失败原因；
         `memory` 仅 Linux（读 /proc/self/status），其他平台为 null。
       operationId: getInfo
@@ -215,11 +234,22 @@ paths:
                 memory:
                   rss_kb: 81244
                   vsize_kb: 1915772
-                tags: 0
-                chunks: 0
+                scoops:
+                  knowledge: { tags: 128, chunks: 340 }
+                  memory: { tags: 56, chunks: 60 }
+                  groupmgr: { tags: 2300, chunks: 2300 }
+                  plugin: { tags: 0, chunks: 0 }
 
 components:
   parameters:
+    ScoopPath:
+      name: scoop
+      in: path
+      required: true
+      description: 分库名（白名单枚举，非法值 → 400）
+      schema:
+        type: string
+        enum: [knowledge, memory, groupmgr, plugin]
     TagPath:
       name: tag
       in: path
@@ -242,8 +272,12 @@ components:
 
     UpsertResponse:
       type: object
-      required: [tag, chunk_count, truncated]
+      required: [scoop, tag, chunk_count, truncated]
       properties:
+        scoop:
+          type: string
+          enum: [knowledge, memory, groupmgr, plugin]
+          description: 入库的分库（原样返回）
         tag:
           type: string
           format: uuid
@@ -300,7 +334,7 @@ components:
         error:
           type: string
           nullable: true
-          description: null 表示成功；否则为该条目失败原因（该条目未入库）
+          description: null 表示成功；否则为该条目失败原因（如归属冲突），该条目未入库
 
     SearchResponse:
       type: object
@@ -325,23 +359,36 @@ components:
           maximum: 1
           description: 相似度（0~1），越高越相似
 
+    ScoopStats:
+      type: object
+      required: [tags, chunks]
+      properties:
+        tags:
+          type: integer
+          description: 该分库 tag 总数
+        chunks:
+          type: integer
+          description: 该分库块向量总数（长文分块后 chunks ≥ tags）
+
+    ScoopStatsMap:
+      type: object
+      description: 各分库规模统计（knowledge / memory / groupmgr / plugin）
+      additionalProperties:
+        $ref: '#/components/schemas/ScoopStats'
+
     HealthResponse:
       type: object
-      required: [status, tags, chunks]
+      required: [status, scoops]
       properties:
         status:
           type: string
           enum: [ok]
-        tags:
-          type: integer
-          description: 当前 tag 总数
-        chunks:
-          type: integer
-          description: 当前块向量总数（长文分块后 chunks ≥ tags）
+        scoops:
+          $ref: '#/components/schemas/ScoopStatsMap'
 
     InfoResponse:
       type: object
-      required: [status, model, memory, tags, chunks]
+      required: [status, model, memory, scoops]
       properties:
         status:
           type: string
@@ -354,10 +401,8 @@ components:
           allOf:
             - $ref: '#/components/schemas/MemoryInfo'
           description: 非 Linux 平台为 null
-        tags:
-          type: integer
-        chunks:
-          type: integer
+        scoops:
+          $ref: '#/components/schemas/ScoopStatsMap'
 
     EmbedderInfo:
       type: object
@@ -415,13 +460,13 @@ components:
 
   responses:
     BadRequest:
-      description: 参数错误（text/q 为空、items 为空等）
+      description: 参数错误（text/q 为空、items 为空、未知 scoop 等）
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
           example:
-            error: text 不能为空
+            error: '未知分库: foo（白名单: knowledge, memory, groupmgr, plugin）'
     NotFound:
       description: 资源不存在
       content:
@@ -430,6 +475,14 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
           example:
             error: 'tag 不存在: 3af2b489-b13a-42e4-af98-fe89d0e6b00e'
+    Conflict:
+      description: tag 归属冲突（同一 tag 已归属其他分库，跨分库写入/删除被拒绝）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: 'tag 3af2b489-b13a-42e4-af98-fe89d0e6b00e 已归属分库 knowledge，跨分库重复写入被拒绝'
     InternalError:
       description: 服务内部错误（模型未加载、存储损坏、嵌入失败等）
       content:

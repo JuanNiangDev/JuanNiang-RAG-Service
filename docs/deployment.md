@@ -6,7 +6,7 @@
 
 - Linux（内存读取依赖 `/proc`，其他平台 `/info` 的 memory 字段为 null）
 - 模型文件：`bge-small-zh-v1.5-q8_0.gguf`（Q8_0，~25MB，`make download` 自动获取）
-- 磁盘：数据目录随库增长（10 万 tag 约 400–650MB）
+- 磁盘：数据目录随各分库累计增长（10 万 tag 约 400–650MB）
 
 ## 2. 本地部署
 
@@ -21,8 +21,8 @@ make build-release
 RAG_DATA_DIR=/var/lib/rag-service make run
 
 # 4. 验证
-curl localhost:3000/health   # {"status":"ok",...}
-curl localhost:3000/info     # model.ready 应为 true
+curl localhost:3000/health   # {"status":"ok","scoops":{"knowledge":{"tags":N,"chunks":M},...}}
+curl localhost:3000/info     # model.ready 应为 true；scoops 为各分库规模
 ```
 
 ### 2.1 systemd 服务（推荐）
@@ -73,8 +73,8 @@ docker run -d --name rag-service --restart unless-stopped \
   rag-service
 
 # 3. 验证
-curl localhost:3000/health
-curl localhost:3000/info   # model.ready 应为 true
+curl localhost:3000/health   # {"status":"ok","scoops":{...}}
+curl localhost:3000/info     # model.ready 应为 true；scoops 为各分库规模
 ```
 
 ### 3.1 国内网络加速（已内置）
@@ -97,7 +97,15 @@ Dockerfile 已针对国内网络做全链路加速，构建时无需额外配置
 
 ### 备份
 
-数据 = `data/` 目录下两个文件，**停止服务后整体复制**最安全：
+数据 = `data/` 目录下各分库子目录（每库一对文件），**停止服务后整体复制整个 `data/` 目录**最安全：
+
+```
+data/scoops/
+  knowledge/   # index.tvim + tags.bin（每库独立原子写）
+  memory/
+  groupmgr/
+  plugin/
+```
 
 ```sh
 systemctl stop rag-service
@@ -105,7 +113,7 @@ tar czf rag-backup-$(date +%F).tar.gz /var/lib/rag-service/
 systemctl start rag-service
 ```
 
-不停止服务的在线备份亦可（快照写入是原子的，最多差最后一次写入），但需保证复制期间无写操作。
+不停止服务的在线备份亦可（每分库快照写入是原子的，最多差最后一次写入），但需保证复制期间无写操作，且跨分库整体复制可能取到库间不一致的时刻。
 
 ### 恢复
 
@@ -113,16 +121,20 @@ systemctl start rag-service
 systemctl stop rag-service
 tar xzf rag-backup-xxx.tar.gz -C /
 systemctl start rag-service
-# 启动日志出现 "存储就绪: N tag" 即恢复成功；若 index.tvim 损坏，
-# 服务会用 tags.bin 原始向量自动重建（前提：RAG_STORE_RAW_VECTORS=true）
+# 启动日志出现 "分库 <name> 就绪: N tag, M 块" 即恢复成功；某分库 index.tvim 损坏时，
+# 服务会用该库 tags.bin 原始向量自动重建（前提：RAG_STORE_RAW_VECTORS=true）
 ```
+
+注意：v2 只加载 `data/scoops/` 下白名单内的分库，`data/` 根目录的旧版平铺文件
+（v1.0.0 的 `data/index.tvim` / `data/tags.bin`）不再读取；`scoops/` 下出现白名单外
+目录时启动会告警跳过（防脏数据混入）。
 
 ## 5. 运维监控
 
 | 手段 | 内容 |
 |---|---|
-| `GET /health` | 存活 + tag/块规模 |
-| `GET /info` | 模型就绪状态、进程内存（`memory.rss_kb`）、规模 |
+| `GET /health` | 存活 + 各分库 tag/块规模（`scoops.<name>.{tags,chunks}`） |
+| `GET /info` | 模型就绪状态、进程内存（`memory.rss_kb`）、各分库规模 |
 | 日志 | 启动/预热/写入/删除事件；"触发重建"提示索引自愈 |
 
 内存监控建议：`memory.rss_kb` 随库规模线性增长（10 万 tag ≈ 800MB–1GB），设定告警阈值；接近上限时评估 `RAG_STORE_RAW_VECTORS=false`（省 ~600MB，代价见下）。
@@ -136,7 +148,7 @@ systemctl stop rag-service
 # 3. 替换二进制 / 重新构建镜像
 # 4. 启动并验证
 systemctl start rag-service
-curl localhost:3000/info    # 确认 model.ready=true、tags/chunks 与备份一致
+curl localhost:3000/info    # 确认 model.ready=true、scoops.<name> 各分库规模与备份一致
 ```
 
 ## 7. 故障排查
@@ -145,8 +157,10 @@ curl localhost:3000/info    # 确认 model.ready=true、tags/chunks 与备份一
 |---|---|
 | 启动日志"模型加载失败" | 模型路径错误 / 文件损坏 / 非 GGUF；用 `RAG_MODEL_PATH` 指向正确文件；`/info` 的 `model.error` 会给出原因 |
 | 写入返回 500"嵌入服务错误" | 模型未加载成功（降级模式）；查 `/info` 的 `model.ready` |
-| 检索结果异常 | 分数为相似度（0~1）；`min_score` 阈值不当；确认查询文本非空 |
-| 启动日志"触发重建" | 正常自愈：索引与快照不一致（崩溃残留/文件损坏）；若同时报"原始向量未持久化"，说明 `RAG_STORE_RAW_VECTORS=false` 且 `.tvim` 损坏，需 Agent 重推全文 |
+| 检索结果异常 | 分数为相似度（0~1）；`min_score` 阈值不当；确认查询文本非空；检索只在目标 scoop 内进行 |
+| 写入返回 400"未知分库" | scoop 名不在白名单（knowledge/memory/groupmgr/plugin）；检查客户端与服务端版本是否一致 |
+| 写入/删除返回 409"已归属分库" | 同一 tag 曾被写入其他分库（tag 全局唯一归属一个 scoop）；确认客户端调用路径的 scoop 是否正确 |
+| 启动日志"触发重建"（按分库） | 正常自愈：该分库索引与快照不一致（崩溃残留/文件损坏）；若同时报"原始向量未持久化"，说明 `RAG_STORE_RAW_VECTORS=false` 且该库 `.tvim` 损坏，需 Agent 重推全文 |
 | 端口占用 | 换 `RAG_PORT` 或停掉占用进程 |
 | 内存持续增长 | 属预期（随库线性）；检查是否误开 `RAG_STORE_RAW_VECTORS` 或库规模超预期 |
 | 服务无响应 | 查日志；`health` 与 `info` 均不可用时检查进程/容器状态（systemd/docker ps） |

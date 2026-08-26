@@ -4,7 +4,7 @@
 pub struct Config {
     /// bge-small-zh-v1.5 Q8_0 GGUF 模型文件路径
     pub model_path: String,
-    /// 数据目录（index.tvim / tags.bin）
+    /// 数据根目录；各分库数据在 {data_dir}/scoops/{scoop}/ 下（index.tvim / tags.bin）
     pub data_dir: String,
     /// HTTP 监听地址
     pub host: String,

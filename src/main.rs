@@ -1,9 +1,9 @@
-//! 程序入口：配置 → 存储加载 → 写者 → HTTP 服务。
+//! 程序入口：配置 → 多分库（scoop）存储加载 → 写者 → HTTP 服务。
 
 use juan_niang_rag_service::api::{AppState, router};
 use juan_niang_rag_service::config::Config;
 use juan_niang_rag_service::embedding::Embedder;
-use juan_niang_rag_service::store::TagStore;
+use juan_niang_rag_service::store::StoreSet;
 use juan_niang_rag_service::writer::Writer;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -22,16 +22,14 @@ async fn main() -> anyhow::Result<()> {
     // 嵌入线程（后台加载模型 + 预热，不阻塞启动）
     let embedder = Embedder::new(&config.model_path, config.n_threads, config.n_ctx);
 
-    // 存储：加载双快照，缺失/损坏自愈重建
-    let store = TagStore::load(&config).map_err(|e| anyhow::anyhow!("存储加载失败: {e}"))?;
-    info!(
-        "存储就绪: {} tag, {} 块",
-        store.tag_count(),
-        store.chunk_count()
-    );
+    // 存储：加载全部分库（双快照，缺失/损坏自愈重建；未知目录跳过）
+    let stores = StoreSet::load(&config).map_err(|e| anyhow::anyhow!("存储加载失败: {e}"))?;
+    for (scoop, tags, chunks) in stores.scoop_stats() {
+        info!("分库 {scoop} 就绪: {tags} tag, {chunks} 块");
+    }
 
-    // 写者任务（独占 store，发布快照）
-    let writer = Arc::new(Writer::start(store, embedder.clone(), config.clone()));
+    // 写者任务（独占 StoreSet，按 scoop 独立发布快照）
+    let writer = Arc::new(Writer::start(stores, embedder.clone(), config.clone()));
     let state = Arc::new(AppState::new(writer, embedder, config.lru_capacity));
 
     let app = router(state);
