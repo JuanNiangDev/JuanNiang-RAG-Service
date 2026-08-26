@@ -14,7 +14,7 @@ use crate::search::{SearchHit, aggregate};
 use crate::store::{Scoop, StoreError};
 use crate::writer::Writer;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -49,11 +49,14 @@ impl AppState {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(console))
         .route("/health", get(health))
         .route("/info", get(info))
         .route("/metrics", get(crate::metrics::metrics))
+        .route("/scoops/{scoop}/tags", get(list_tags))
         .route("/scoops/{scoop}/tags/{tag}", put(upsert).delete(delete_tag))
         .route("/scoops/{scoop}/tags/batch", post(batch_upsert))
+        .route("/scoops/{scoop}/tags/batch-delete", post(batch_delete))
         .route("/scoops/{scoop}/tags/search", get(search))
         .with_state(state)
         // HTTP 请求指标（请求数/耗时，path 用路由模板保持低基数）
@@ -61,6 +64,42 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 // ---------- 请求/响应类型 ----------
+
+/// Web 控制台 HTML（内嵌，无鉴权；仅限内网/本机使用）
+const CONSOLE_HTML: &str = include_str!("../web/index.html");
+
+/// 分页列表响应
+#[derive(Serialize)]
+pub struct TagListResponse {
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+    pub items: Vec<TagListItem>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TagListItem {
+    pub tag: Uuid,
+    pub chunk_count: usize,
+}
+
+/// 批量删除请求/响应
+#[derive(Deserialize)]
+pub struct BatchDeleteRequest {
+    pub tags: Vec<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct BatchDeleteItemResponse {
+    pub tag: Uuid,
+    pub deleted: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BatchDeleteResponse {
+    pub results: Vec<BatchDeleteItemResponse>,
+}
 
 #[derive(Deserialize)]
 pub struct UpsertRequest {
@@ -157,6 +196,14 @@ fn scoop_stats_map(stats: Vec<(Scoop, usize, usize)>) -> HashMap<String, ScoopSt
 }
 
 // ---------- 处理器 ----------
+
+/// GET /：简易无鉴权 Web 控制台（基础信息 + 分页查看/增删向量）。
+async fn console() -> impl axum::response::IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        CONSOLE_HTML,
+    )
+}
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -320,6 +367,94 @@ async fn delete_tag(
 ) -> Result<Json<serde_json::Value>, AppError> {
     state.writer.delete(scoop, tag).await?;
     Ok(Json(serde_json::json!({ "deleted": tag })))
+}
+
+/// GET /scoops/{scoop}/tags?page=&page_size=：分页列出该分库全部 tag（UUID 排序）。
+/// 读快照实现，不经过写者（无锁）。page_size 上限 100。
+#[derive(Deserialize)]
+struct ListParams {
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default = "default_page_size")]
+    page_size: usize,
+}
+
+fn default_page() -> usize {
+    1
+}
+
+fn default_page_size() -> usize {
+    20
+}
+
+async fn list_tags(
+    State(state): State<Arc<AppState>>,
+    Path(scoop): Path<Scoop>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<TagListResponse>, AppError> {
+    let page = params.page.max(1);
+    let page_size = params.page_size.clamp(1, 100);
+
+    let snap = state.writer.snapshot(scoop);
+    let mut tags: Vec<TagListItem> = snap
+        .tag_to_ids
+        .iter()
+        .map(|(tag, ids)| TagListItem {
+            tag: *tag,
+            chunk_count: ids.len(),
+        })
+        .collect();
+    // UUID 字典序分页（稳定、可复现）
+    tags.sort_by(|a, b| a.tag.cmp(&b.tag));
+    let total = tags.len();
+    let start = (page - 1) * page_size;
+    let items = if start >= total {
+        Vec::new()
+    } else {
+        let end = (start + page_size).min(total);
+        tags[start..end].to_vec()
+    };
+    Ok(Json(TagListResponse {
+        total,
+        page,
+        page_size,
+        items,
+    }))
+}
+
+/// POST /scoops/{scoop}/tags/batch-delete：批量删除（逐条尝试，单条失败不影响其他）。
+async fn batch_delete(
+    State(state): State<Arc<AppState>>,
+    Path(scoop): Path<Scoop>,
+    Json(body): Json<BatchDeleteRequest>,
+) -> Result<Json<BatchDeleteResponse>, AppError> {
+    if body.tags.is_empty() {
+        return Err(AppError::bad_request("tags 不能为空"));
+    }
+    if body.tags.len() > 500 {
+        return Err(AppError::bad_request("单次批量删除上限 500 条"));
+    }
+    let tags = body.tags;
+    // writer 返回顺序与请求一致
+    let results = state.writer.batch_delete(scoop, tags.clone()).await?;
+    let mut resp = BatchDeleteResponse {
+        results: Vec::with_capacity(results.len()),
+    };
+    for (tag, r) in tags.into_iter().zip(results) {
+        match r {
+            Ok(()) => resp.results.push(BatchDeleteItemResponse {
+                tag,
+                deleted: true,
+                error: None,
+            }),
+            Err(e) => resp.results.push(BatchDeleteItemResponse {
+                tag,
+                deleted: false,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+    Ok(Json(resp))
 }
 
 // ---------- 统一错误 → HTTP 响应 ----------

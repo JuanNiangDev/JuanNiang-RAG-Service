@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JuanNiang RAG-Service 控制台</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --border:#2a3650; --text:#dbe4f5; --dim:#8fa0bf;
+          --accent:#4f8cff; --ok:#3fb98a; --err:#e5534b; --warn:#e0b341; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; padding:20px; }
+  .banner { background:#3a2b12; border:1px solid var(--warn); color:var(--warn); padding:8px 14px;
+            border-radius:8px; margin-bottom:16px; font-size:13px; }
+  h1 { font-size:20px; margin-bottom:4px; }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .card .label { color:var(--dim); font-size:12px; }
+  .card .value { font-size:20px; font-weight:700; margin-top:2px; }
+  .card .value.small { font-size:14px; }
+  .ok { color:var(--ok); } .err { color:var(--err); } .dim { color:var(--dim); }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+  .tab { padding:6px 16px; border-radius:8px; border:1px solid var(--border); background:var(--card);
+         cursor:pointer; font-size:13px; user-select:none; }
+  .tab.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  .btn { padding:6px 14px; border-radius:8px; border:1px solid var(--border); background:var(--card);
+         color:var(--text); cursor:pointer; font-size:13px; }
+  .btn:hover { border-color:var(--accent); }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.danger { background:transparent; border-color:var(--err); color:var(--err); }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--border);
+          border-radius:10px; overflow:hidden; }
+  th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--border); font-size:13px; }
+  th { color:var(--dim); font-weight:600; background:#1e293b; }
+  tr:last-child td { border-bottom:none; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; }
+  .pager { display:flex; gap:8px; align-items:center; margin-top:12px; color:var(--dim); font-size:13px; }
+  .pager .btn { padding:4px 10px; }
+  .form { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; margin-top:16px; }
+  .form h3 { font-size:14px; margin-bottom:10px; }
+  .form-row { display:flex; gap:10px; margin-bottom:10px; flex-wrap:wrap; align-items:center; }
+  .form-row label { color:var(--dim); font-size:12px; min-width:52px; }
+  input[type=text], textarea { background:#0f1729; border:1px solid var(--border); border-radius:6px;
+          color:var(--text); padding:6px 10px; font-size:13px; font-family:inherit; }
+  textarea { width:100%; min-height:60px; resize:vertical; }
+  input[type=text] { flex:1; min-width:160px; }
+  .msg { margin-top:10px; font-size:13px; }
+  .msg.ok { color:var(--ok); } .msg.err { color:var(--err); }
+  .empty { padding:24px; text-align:center; color:var(--dim); }
+  .check { width:16px; height:16px; accent-color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="banner">⚠ 无鉴权管理控制台——可直接增删向量数据，仅限本机/内网使用，请勿暴露公网。</div>
+<h1>JuanNiang RAG-Service 控制台</h1>
+<div class="sub">简易管理界面 · API 见 docs/API.md · 指标见 /metrics</div>
+
+<div class="cards" id="statusCards"></div>
+
+<div class="tabs" id="scoopTabs"></div>
+
+<div class="toolbar">
+  <button class="btn" onclick="loadTags()">刷新列表</button>
+  <button class="btn danger" id="btnBatchDelete" onclick="batchDelete()" disabled>批量删除所选</button>
+  <span class="dim" id="selCount"></span>
+</div>
+
+<table id="tagTable">
+  <thead><tr>
+    <th style="width:32px"><input type="checkbox" class="check" id="checkAll" onchange="toggleAll()"></th>
+    <th>UUID（tag）</th><th>块数</th><th style="width:80px">操作</th>
+  </tr></thead>
+  <tbody id="tagBody"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+</table>
+
+<div class="pager">
+  <button class="btn" id="prevPage" onclick="gotoPage(-1)" disabled>上一页</button>
+  <span id="pageInfo">-</span>
+  <button class="btn" id="nextPage" onclick="gotoPage(1)" disabled>下一页</button>
+</div>
+
+<div class="form">
+  <h3>添加 / 更新向量（upsert，同 tag 覆盖）</h3>
+  <div class="form-row"><label>文本</label>
+    <textarea id="addText" placeholder="要入库的文本内容（长文服务端自动分块）"></textarea>
+  </div>
+  <div class="form-row"><label>Tag</label>
+    <input type="text" id="addTag" placeholder="留空自动生成 UUID">
+    <button class="btn primary" onclick="addVector()">添加</button>
+  </div>
+  <div class="msg" id="addMsg"></div>
+</div>
+
+<script>
+const SCOOPS = ['knowledge', 'memory', 'groupmgr', 'plugin'];
+let currentScoop = 'knowledge';
+let currentPage = 1;
+const pageSize = 20;
+let total = 0;
+let selected = new Set();
+
+async function api(path, opts = {}) {
+  const resp = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try { detail = (await resp.json()).error || ''; } catch {}
+    throw new Error(`HTTP ${resp.status}${detail ? ': ' + detail : ''}`);
+  }
+  return resp.json();
+}
+
+// ---------- 基础信息 ----------
+async function loadInfo() {
+  try {
+    const info = await api('/info');
+    const m = info.model, mem = info.memory, sc = info.scoops || {};
+    let cards = '';
+    cards += `<div class="card"><div class="label">模型状态</div>
+      <div class="value ${m.ready ? 'ok' : 'err'}">${m.ready ? '就绪' : '未就绪'}</div>
+      <div class="dim" style="font-size:11px">${m.model_name || '-'} · ${m.dim || '-'} 维 · ${m.n_threads || '-'} 线程</div></div>`;
+    cards += `<div class="card"><div class="label">进程内存</div>
+      <div class="value small">${mem ? (mem.rss_kb / 1024).toFixed(0) + ' MB' : 'N/A'}</div>
+      <div class="dim" style="font-size:11px">RSS</div></div>`;
+    for (const s of SCOOPS) {
+      const st = sc[s] || { tags: 0, chunks: 0 };
+      cards += `<div class="card"><div class="label">分库 ${s}</div>
+        <div class="value small">${st.tags} tag · ${st.chunks} 块</div>
+        <div class="dim" style="font-size:11px">${st.tags > 0 ? (st.chunks / st.tags).toFixed(1) + ' 块/tag' : '-'}</div></div>`;
+    }
+    document.getElementById('statusCards').innerHTML = cards;
+  } catch (e) {
+    document.getElementById('statusCards').innerHTML = `<div class="err">状态加载失败: ${e.message}</div>`;
+  }
+}
+
+// ---------- 分库 tabs ----------
+function initTabs() {
+  document.getElementById('scoopTabs').innerHTML = SCOOPS.map(s =>
+    `<div class="tab ${s === currentScoop ? 'active' : ''}" onclick="switchScoop('${s}')">${s}</div>`
+  ).join('');
+}
+
+function switchScoop(s) {
+  currentScoop = s; currentPage = 1; selected.clear(); updateSelectUI();
+  initTabs(); loadTags();
+}
+
+// ---------- 列表 + 分页 ----------
+async function loadTags() {
+  const body = document.getElementById('tagBody');
+  body.innerHTML = '<tr><td colspan="4" class="empty">加载中…</td></tr>';
+  try {
+    const data = await api(`/scoops/${currentScoop}/tags?page=${currentPage}&page_size=${pageSize}`);
+    total = data.total;
+    if (data.items.length === 0) {
+      body.innerHTML = '<tr><td colspan="4" class="empty">该分库暂无向量</td></tr>';
+    } else {
+      body.innerHTML = data.items.map(it => {
+        const checked = selected.has(it.tag) ? 'checked' : '';
+        return `<tr>
+          <td><input type="checkbox" class="check" data-tag="${it.tag}" ${checked} onchange="toggleOne('${it.tag}')"></td>
+          <td class="mono">${it.tag}</td>
+          <td>${it.chunk_count}</td>
+          <td><button class="btn danger" onclick="deleteOne('${it.tag}')">删除</button></td>
+        </tr>`;
+      }).join('');
+    }
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    document.getElementById('pageInfo').textContent = `第 ${currentPage} / ${pages} 页 · 共 ${total} 条`;
+    document.getElementById('prevPage').disabled = currentPage <= 1;
+    document.getElementById('nextPage').disabled = currentPage >= pages;
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="4" class="empty err">加载失败: ${e.message}</td></tr>`;
+  }
+}
+
+function gotoPage(delta) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const next = currentPage + delta;
+  if (next < 1 || next > pages) return;
+  currentPage = next;
+  loadTags();
+}
+
+// ---------- 选择 ----------
+function toggleOne(tag) {
+  if (selected.has(tag)) selected.delete(tag); else selected.add(tag);
+  updateSelectUI();
+}
+
+function toggleAll() {
+  const all = document.getElementById('checkAll').checked;
+  selected.clear();
+  if (all) {
+    document.querySelectorAll('#tagBody input[type=checkbox]').forEach(cb => {
+      if (cb.dataset.tag) selected.add(cb.dataset.tag);
+    });
+  }
+  updateSelectUI();
+}
+
+function updateSelectUI() {
+  const n = selected.size;
+  document.getElementById('selCount').textContent = n ? `已选 ${n} 条` : '';
+  document.getElementById('btnBatchDelete').disabled = n === 0;
+}
+
+// ---------- 增删 ----------
+function showMsg(text, ok) {
+  const el = document.getElementById('addMsg');
+  el.className = 'msg ' + (ok ? 'ok' : 'err');
+  el.textContent = text;
+}
+
+async function addVector() {
+  const text = document.getElementById('addText').value.trim();
+  if (!text) { showMsg('请输入文本内容', false); return; }
+  let tag = document.getElementById('addTag').value.trim();
+  if (!tag) tag = crypto.randomUUID();
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(tag)) {
+    showMsg('Tag 必须是 UUID 格式（或留空自动生成）', false); return;
+  }
+  try {
+    const r = await api(`/scoops/${currentScoop}/tags/${tag}`, {
+      method: 'PUT',
+      body: JSON.stringify({ text }),
+    });
+    showMsg(`已写入 ${currentScoop}/${tag}（${r.chunk_count} 块${r.truncated ? '，含截断' : ''}）`, true);
+    document.getElementById('addText').value = '';
+    document.getElementById('addTag').value = '';
+    loadInfo(); loadTags();
+  } catch (e) { showMsg('写入失败: ' + e.message, false); }
+}
+
+async function deleteOne(tag) {
+  if (!confirm(`确认删除 ${tag}？`)) return;
+  try {
+    await api(`/scoops/${currentScoop}/tags/${tag}`, { method: 'DELETE' });
+    selected.delete(tag); updateSelectUI();
+    loadInfo(); loadTags();
+  } catch (e) { alert('删除失败: ' + e.message); }
+}
+
+async function batchDelete() {
+  if (selected.size === 0) return;
+  if (!confirm(`确认批量删除 ${selected.size} 条向量？`)) return;
+  const tags = [...selected];
+  try {
+    const r = await api(`/scoops/${currentScoop}/tags/batch-delete`, {
+      method: 'POST',
+      body: JSON.stringify({ tags }),
+    });
+    const failed = r.results.filter(x => !x.deleted);
+    alert(failed.length === 0
+      ? `已删除 ${tags.length} 条`
+      : `删除完成：成功 ${tags.length - failed.length} 条，失败 ${failed.length} 条（${failed[0].error}）`);
+    selected.clear(); updateSelectUI();
+    loadInfo(); loadTags();
+  } catch (e) { alert('批量删除失败: ' + e.message); }
+}
+
+// ---------- 启动 ----------
+initTabs();
+loadInfo();
+loadTags();
+setInterval(loadInfo, 5000); // 状态卡 5s 自动刷新
+</script>
+</body>
+</html>

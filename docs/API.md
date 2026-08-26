@@ -11,8 +11,11 @@
   - [分库 scoop](#分库-scoop)
   - [分数语义](#分数语义)
   - [错误格式](#错误格式)
+- [GET / —— Web 控制台](#get----web-控制台)
 - [PUT /scoops/{scoop}/tags/{tag} —— 更新（upsert）](#put-scoopsscooptagstag--更新upsert)
 - [POST /scoops/{scoop}/tags/batch —— 批量更新](#post-scoopsscooptagsbatch--批量更新)
+- [GET /scoops/{scoop}/tags —— 分页列表](#get-scoopsscooptags--分页列表)
+- [POST /scoops/{scoop}/tags/batch-delete —— 批量删除](#post-scoopsscooptagsbatch-delete--批量删除)
 - [GET /scoops/{scoop}/tags/search —— 检索](#get-scoopsscooptagssearch--检索)
 - [DELETE /scoops/{scoop}/tags/{tag} —— 删除](#delete-scoopsscooptagstag--删除)
 - [GET /health —— 健康检查](#get-health--健康检查)
@@ -64,6 +67,21 @@ COW 拷贝均按 scoop 独立）。
 | 404 | 资源不存在 | 删除不存在的 tag |
 | 409 | 归属冲突 | 同一 tag 跨 scoop 重复写入/删除（tag 全局只允许归属一个 scoop） |
 | 500 | 服务内部错误 | 模型未加载、存储损坏、嵌入失败等 |
+
+---
+
+## GET / —— Web 控制台
+
+简易**无鉴权**管理页面（内嵌 HTML，仅限本机/内网使用，勿暴露公网）：
+
+- 基础信息：模型状态/内存/各分库规模（5s 自动刷新）
+- 分页查看各分库全部 tag（UUID + 块数，每页 20 条）
+- 添加/更新向量（留空 tag 自动生成 UUID）、单条删除、勾选批量删除
+
+```sh
+# 浏览器打开
+http://localhost:3000/
+```
 
 ---
 
@@ -179,6 +197,71 @@ curl -X POST localhost:3000/scoops/memory/tags/batch \
 ```
 
 **建议**：Agent 侧做首次全量同步或批量更新时使用本端点；已成功的条目即使部分失败也会落盘。
+
+---
+
+## GET /scoops/{scoop}/tags —— 分页列表
+
+分页列出该分库全部 tag（UUID 字典序，稳定可复现）。
+
+```
+GET /scoops/{scoop}/tags?page=<页码>&page_size=<每页条数>
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `page` | `1` | 页码（从 1 起） |
+| `page_size` | `20` | 每页条数，范围 1–100 |
+
+**响应 200**：
+
+```json
+{
+  "total": 128,
+  "page": 1,
+  "page_size": 20,
+  "items": [
+    { "tag": "3af2b489-b13a-42e4-af98-fe89d0e6b00e", "chunk_count": 4 },
+    { "tag": "22222222-2222-2222-2222-222222222222", "chunk_count": 1 }
+  ]
+}
+```
+
+**说明**：读快照实现（无锁、不经过写者）；`chunk_count` 为该 tag 的块向量数。
+
+---
+
+## POST /scoops/{scoop}/tags/batch-delete —— 批量删除
+
+逐条尝试删除（不属于本 scoop 的 tag 单条失败，不影响其他）；有成功条目时一次持久化+发布。
+
+```
+POST /scoops/{scoop}/tags/batch-delete
+```
+
+**请求体**：
+
+```json
+{ "tags": ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"] }
+```
+
+**响应 200**（顺序与请求一致）：
+
+```json
+{
+  "results": [
+    { "tag": "11111111-1111-1111-1111-111111111111", "deleted": true,  "error": null },
+    { "tag": "22222222-2222-2222-2222-222222222222", "deleted": false, "error": "存储错误: tag 不存在: ..." }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `deleted` | 是否成功删除 |
+| `error` | `null` 表示成功；否则为该条失败原因 |
+
+**限制**：单次最多 500 条；`tags` 为空返回 400。
 
 ---
 

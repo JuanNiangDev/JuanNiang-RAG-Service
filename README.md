@@ -45,8 +45,11 @@ RAG_STORE_RAW_VECTORS=true # 存原始向量，index.tvim 损坏可自愈
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/` | 简易无鉴权 Web 控制台（基础信息 + 分页查看/增删向量） |
 | PUT | `/scoops/{scoop}/tags/{tag}` | upsert：`{"text": "..."}`；长文自动分块 |
 | POST | `/scoops/{scoop}/tags/batch` | 批量：`{"items": [{"tag": "...", "text": "..."}]}`，一次嵌入一次发布 |
+| GET | `/scoops/{scoop}/tags?page=&page_size=` | 分页列出该分库全部 tag（UUID + 块数，上限 100 条/页） |
+| POST | `/scoops/{scoop}/tags/batch-delete` | 批量删除：`{"tags": [...]}`（逐条尝试，上限 500 条） |
 | GET | `/scoops/{scoop}/tags/search?q=&k=&min_score=` | 检索（**限定在 scoop 内**），返回 tag 列表 + 分数（0~1） |
 | DELETE | `/scoops/{scoop}/tags/{tag}` | 删除 |
 | GET | `/health` | 健康检查 + 各分库 tag/块数量 |
@@ -70,6 +73,19 @@ curl 'localhost:3000/scoops/knowledge/tags/search?q=入库的中文文本&k=5'
 cargo test                      # 单元测试（纯函数，不需要模型）
 RAG_MODEL_PATH=models/bge-small-zh-v1.5-q8_0.gguf cargo test -- --ignored   # 需要模型
 cargo run --release --example bench   # 基准三件套
+```
+
+## Web 控制台
+
+`GET /` 提供简易**无鉴权**管理页面（仅限本机/内网，勿暴露公网）：
+
+- 基础信息：模型状态 / 进程内存 / 各分库规模（5s 自动刷新）
+- 分库切换（knowledge / memory / groupmgr / plugin），分页查看全部 tag（UUID + 块数）
+- 添加/更新向量（tag 留空自动生成 UUID）、单条删除、勾选批量删除
+
+```sh
+# 浏览器打开
+curl localhost:3000/ | head   # 或直接浏览器访问
 ```
 
 ## 监控指标（Prometheus / Grafana）

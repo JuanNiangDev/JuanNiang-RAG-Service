@@ -53,6 +53,11 @@ enum WriteCmd {
         tag: Uuid,
         reply: oneshot::Sender<Result<(), ServiceError>>,
     },
+    BatchDelete {
+        scoop: Scoop,
+        tags: Vec<Uuid>,
+        reply: oneshot::Sender<Vec<Result<(), ServiceError>>>,
+    },
 }
 
 /// 写者句柄：Clone 可分享，内部是 `Sender<WriteCmd>` + 各 scoop 最新快照
@@ -141,6 +146,23 @@ impl Writer {
             .map_err(|_| ServiceError::Writer(WriterError::Closed))?
     }
 
+    /// 批量删除：逐条尝试（不属于本 scoop 的 tag 单条失败，不影响其他），
+    /// 有成功条目时一次持久化+发布。返回逐条结果。
+    pub async fn batch_delete(
+        &self,
+        scoop: Scoop,
+        tags: Vec<Uuid>,
+    ) -> Result<Vec<Result<(), ServiceError>>, ServiceError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(WriteCmd::BatchDelete { scoop, tags, reply })
+            .await
+            .map_err(|_| ServiceError::Writer(WriterError::Closed))?;
+        // rx 内容本身即 Result<Vec<...>, ServiceError>，RecvError 需转换
+        rx.await
+            .map_err(|_| ServiceError::Writer(WriterError::Closed))
+    }
+
     /// 各 scoop 规模：(scoop, tag 数, 块数)
     pub fn health(&self) -> Vec<(Scoop, usize, usize)> {
         Scoop::ALL
@@ -200,6 +222,10 @@ impl WriterTask {
             WriteCmd::Delete { scoop, tag, reply } => {
                 let result = self.apply_delete(scoop, tag);
                 let _ = reply.send(result);
+            }
+            WriteCmd::BatchDelete { scoop, tags, reply } => {
+                let results = self.apply_batch_delete(scoop, tags);
+                let _ = reply.send(results);
             }
         }
     }
@@ -355,6 +381,48 @@ impl WriterTask {
                 .inc();
         }
         result
+    }
+
+    /// 批量删除：逐条尝试，有成功条目时一次持久化+发布。
+    fn apply_batch_delete(
+        &mut self,
+        scoop: Scoop,
+        tags: Vec<Uuid>,
+    ) -> Vec<Result<(), ServiceError>> {
+        let start = std::time::Instant::now();
+        let mut results = Vec::with_capacity(tags.len());
+        let mut any_ok = false;
+        for tag in tags {
+            match self.stores.delete(scoop, tag) {
+                Ok(()) => {
+                    any_ok = true;
+                    results.push(Ok(()));
+                }
+                Err(e) => results.push(Err(ServiceError::Store(e))),
+            }
+        }
+        // 有成功条目才持久化+发布（全失败时无变更，跳过 commit）
+        if any_ok {
+            if let Err(e) = self.commit(scoop) {
+                warn!(scoop = %scoop, "批量删除持久化失败: {e}");
+            }
+        }
+        info!(scoop = %scoop, n = results.len(), "批量删除完成");
+        // 指标：逐条按 op=delete 计数（面板维度不变），耗时记整批一次
+        crate::metrics::write_duration()
+            .with_label_values(&["delete", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        for r in &results {
+            crate::metrics::write_total()
+                .with_label_values(&["delete", scoop.as_str()])
+                .inc();
+            if r.is_err() {
+                crate::metrics::write_errors()
+                    .with_label_values(&["delete", scoop.as_str()])
+                    .inc();
+            }
+        }
+        results
     }
 
     /// 分块 + 批量嵌入。返回 (每文本的块列表, 每文本的向量列表, 每文本是否有截断)
