@@ -22,7 +22,8 @@ use prometheus::{
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::api::AppState;
 
@@ -229,6 +230,22 @@ fn embedder_ready() -> &'static IntGauge {
     M.get_or_init(|| gauge("rag_embedder_ready", "嵌入模型是否就绪（0/1）"))
 }
 
+/// 上次成功读取的就绪状态：scrape 遇到嵌入线程繁忙超时时回退此值，
+/// 保证 /metrics 永远不会被卡在推理后面。
+static LAST_READY: AtomicI64 = AtomicI64::new(0);
+
+/// scrape 时读取就绪状态；超时（嵌入线程正忙于长批量推理）则返回上次值。
+async fn ready_with_fallback(state: &Arc<AppState>) -> i64 {
+    match tokio::time::timeout(Duration::from_millis(500), state.embedder.info()).await {
+        Ok(info) => {
+            let v = info.ready as i64;
+            LAST_READY.store(v, Ordering::Relaxed);
+            v
+        }
+        Err(_) => LAST_READY.load(Ordering::Relaxed),
+    }
+}
+
 // ---------- HTTP 中间件（请求数/耗时；path 用路由模板保持低基数） ----------
 
 pub async fn http_metrics(req: Request, next: Next) -> Response {
@@ -239,7 +256,7 @@ pub async fn http_metrics(req: Request, next: Next) -> Response {
         .extensions()
         .get::<MatchedPath>()
         .map(|m| m.as_str().to_string())
-        .unwrap_or_else(|| req.uri().path().to_string());
+        .unwrap_or_else(|| "<unmatched>".to_string());
     let start = Instant::now();
     let resp = next.run(req).await;
     let status = resp.status().as_u16().to_string();
@@ -265,9 +282,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Response {
             .with_label_values(&[scoop.as_str()])
             .set(chunks as i64);
     }
-    // 模型就绪状态 gauge
-    let ready = state.embedder.info().await.ready;
-    embedder_ready().set(ready as i64);
+    // 模型就绪状态 gauge：带超时，嵌入线程繁忙时不阻塞 scrape
+    embedder_ready().set(ready_with_fallback(&state).await);
 
     let encoder = TextEncoder::new();
     let mut buf = Vec::new();

@@ -405,7 +405,7 @@ async fn list_tags(
         })
         .collect();
     // UUID 字典序分页（稳定、可复现）
-    tags.sort_by(|a, b| a.tag.cmp(&b.tag));
+    tags.sort_by_key(|a| a.tag);
     let total = tags.len();
     let start = (page - 1) * page_size;
     let items = if start >= total {

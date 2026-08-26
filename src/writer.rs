@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -329,11 +329,17 @@ impl WriterTask {
             }
         }
 
-        // 3. 即使有条目失败，已成功的部分也要持久化+发布
+        // 3. 即使有条目失败，已成功的部分也要持久化+发布；
+        //    持久化/发布失败必须让调用方感知：成功条目标记为失败（未落盘）
         if (!any_error || results.iter().any(|r| r.is_ok()))
             && let Err(e) = self.commit(scoop)
         {
-            warn!(scoop = %scoop, "批量持久化失败: {e}");
+            let msg = format!("批量写入持久化失败: {e}");
+            for r in results.iter_mut() {
+                if r.is_ok() {
+                    *r = Err(ServiceError::Internal(msg.clone()));
+                }
+            }
         }
         info!(scoop = %scoop, n = items.len(), "批量 upsert 完成");
         // 指标（op=batch：一次批量 = 一次写操作，逐条结果计入块数/错误）
@@ -401,10 +407,14 @@ impl WriterTask {
                 Err(e) => results.push(Err(ServiceError::Store(e))),
             }
         }
-        // 有成功条目才持久化+发布（全失败时无变更，跳过 commit）
-        if any_ok {
-            if let Err(e) = self.commit(scoop) {
-                warn!(scoop = %scoop, "批量删除持久化失败: {e}");
+        // 有成功条目才持久化+发布（全失败时无变更，跳过 commit）；
+        // 持久化失败时把成功条目标记为失败，避免调用方误以为已落盘
+        if any_ok && let Err(e) = self.commit(scoop) {
+            let msg = format!("批量删除持久化失败: {e}");
+            for r in results.iter_mut() {
+                if r.is_ok() {
+                    *r = Err(ServiceError::Internal(msg.clone()));
+                }
             }
         }
         info!(scoop = %scoop, n = results.len(), "批量删除完成");

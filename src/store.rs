@@ -36,6 +36,8 @@ pub enum StoreError {
     Vector(#[from] VectorError),
     #[error("tag 不存在: {0}")]
     TagNotFound(Uuid),
+    #[error("tag {0} 同时归属分库 {1} 与 {2}（数据损坏），拒绝恢复：请人工核查两个分库的 tags.bin")]
+    TagMultiScoop(Uuid, Scoop, Scoop),
     #[error("未知分库: {0}（白名单: {1}）")]
     UnknownScoop(String, &'static str),
     #[error("tag {0} 已归属分库 {1}，跨分库重复写入被拒绝")]
@@ -370,21 +372,28 @@ impl StoreSet {
     pub fn load(config: &Config) -> Result<Self, StoreError> {
         let mut stores = HashMap::new();
         let base = PathBuf::from(&config.data_dir).join("scoops");
-        if let Ok(entries) = std::fs::read_dir(&base) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                match Scoop::from_str(&name) {
-                    Ok(scoop) => {
-                        if !stores.contains_key(&scoop) {
-                            stores.insert(scoop, TagStore::load(config, scoop)?);
+        match std::fs::read_dir(&base) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry =
+                        entry.map_err(|e| StoreError::Io(format!("读取分库目录项失败: {e}")))?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    match Scoop::from_str(&name) {
+                        Ok(scoop) => {
+                            let store = TagStore::load(config, scoop)?;
+                            stores.entry(scoop).or_insert(store);
                         }
+                        Err(_) if entry.path().is_dir() => {
+                            warn!("分库目录 {name} 不在白名单内，跳过加载（如需使用请升级白名单）");
+                        }
+                        Err(_) => {}
                     }
-                    Err(_) if entry.path().is_dir() => {
-                        warn!("分库目录 {name} 不在白名单内，跳过加载（如需使用请升级白名单）");
-                    }
-                    Err(_) => {}
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 全新部署：scoops/ 尚不存在，走下方白名单初始化空库
+            }
+            Err(e) => return Err(StoreError::Io(format!("扫描分库目录失败: {e}"))),
         }
         for scoop in Scoop::ALL {
             stores
@@ -396,18 +405,31 @@ impl StoreSet {
             stores,
             tag_owner: HashMap::new(),
         };
-        set.rebuild_tag_owner();
+        set.rebuild_tag_owner()?;
         Ok(set)
     }
 
-    /// 从各库 tag_to_ids 重建 tag → scoop 注册表（启动/手动调用）
-    fn rebuild_tag_owner(&mut self) {
+    /// 从各库 tag_to_ids 重建 tag → scoop 注册表（启动/手动调用）。
+    ///
+    /// 同一 tag 出现在多个分库视为数据损坏：确定性报错（绝不静默覆盖，
+    /// 且不依赖 HashMap 迭代顺序），需人工核查后处理两个分库的 tags.bin。
+    fn rebuild_tag_owner(&mut self) -> Result<(), StoreError> {
         self.tag_owner.clear();
+        let mut pairs: Vec<(Scoop, Uuid)> = Vec::new();
         for (&scoop, store) in &self.stores {
             for &tag in store.tag_to_ids.keys() {
-                self.tag_owner.insert(tag, scoop);
+                pairs.push((scoop, tag));
             }
         }
+        pairs.sort(); // 确定性顺序：与 HashMap 迭代无关
+        for (scoop, tag) in pairs {
+            if let Some(prev) = self.tag_owner.insert(tag, scoop)
+                && prev != scoop
+            {
+                return Err(StoreError::TagMultiScoop(tag, prev, scoop));
+            }
+        }
+        Ok(())
     }
 
     fn scoop(&self, scoop: Scoop) -> &TagStore {
@@ -428,10 +450,10 @@ impl StoreSet {
         chunks: &[String],
         vectors: &[Vec<f32>],
     ) -> Result<usize, StoreError> {
-        if let Some(&owner) = self.tag_owner.get(&tag) {
-            if owner != scoop {
-                return Err(StoreError::TagInOtherScoop(tag, owner));
-            }
+        if let Some(&owner) = self.tag_owner.get(&tag)
+            && owner != scoop
+        {
+            return Err(StoreError::TagInOtherScoop(tag, owner));
         }
         let n = self.scoop_mut(scoop).upsert(tag, chunks, vectors)?;
         self.tag_owner.insert(tag, scoop);
@@ -440,10 +462,10 @@ impl StoreSet {
 
     /// 删除（带归属校验）：只能删除属于本 scoop 的 tag。
     pub fn delete(&mut self, scoop: Scoop, tag: Uuid) -> Result<(), StoreError> {
-        if let Some(&owner) = self.tag_owner.get(&tag) {
-            if owner != scoop {
-                return Err(StoreError::TagInOtherScoop(tag, owner));
-            }
+        if let Some(&owner) = self.tag_owner.get(&tag)
+            && owner != scoop
+        {
+            return Err(StoreError::TagInOtherScoop(tag, owner));
         }
         self.scoop_mut(scoop).delete(tag)?;
         self.tag_owner.remove(&tag);
@@ -646,6 +668,41 @@ mod tests {
             ),
             Ok(1)
         ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一 tag 的 tags.bin 出现在两个 scoop 目录（数据损坏）：
+    /// 启动重建注册表必须确定性报错，而不是静默覆盖归属。
+    #[test]
+    fn rebuild_owner_detects_duplicate_tag() {
+        let dir = std::env::temp_dir().join(format!("rag_dup_{}", Uuid::new_v4()));
+        let cfg = test_config(&dir);
+
+        // 手工向两个分库目录写入同一 tag 的 tags.bin
+        let tag = Uuid::new_v4();
+        for scoop in [Scoop::Knowledge, Scoop::Memory] {
+            let mut store = TagStore::empty(&cfg, scoop).unwrap();
+            store
+                .upsert(tag, &["内容".into()], &[fake_vector(8, 0.5)])
+                .unwrap();
+            store.persist().unwrap();
+        }
+
+        // 加载必须失败，且错误携带两个冲突分库名
+        let err = match StoreSet::load(&cfg) {
+            Ok(_) => panic!("损坏数据不应加载成功"),
+            Err(e) => e,
+        };
+        match err {
+            StoreError::TagMultiScoop(t, a, b) => {
+                assert_eq!(t, tag);
+                let names = [a.as_str(), b.as_str()];
+                assert!(names.contains(&"knowledge"));
+                assert!(names.contains(&"memory"));
+            }
+            other => panic!("期望 TagMultiScoop，实际: {other}"),
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

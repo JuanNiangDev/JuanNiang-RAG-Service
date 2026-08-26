@@ -401,7 +401,16 @@ let selected = new Set();
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const uuid = () => crypto.randomUUID();
+// crypto.randomUUID() 仅安全上下文（https/localhost）可用；
+// 非 localhost HTTP 部署回退到 getRandomValues 手搓 UUID v4
+const uuid = () => {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+  const h = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+};
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const fmtMem = (kb) => kb ? (kb / 1024).toFixed(0) + ' MB' : 'N/A';
 
@@ -507,6 +516,14 @@ async function loadTags() {
   try {
     const data = await api(`/scoops/${currentScoop}/tags?page=${currentPage}&page_size=${pageSize}`);
     total = data.total;
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    // 删除后当前页可能越界（如第 3 页删剩 1 页）：回退到最后一页并重新加载，
+    // 避免误渲染“暂无向量”空态和越界页码
+    if (currentPage > pages) {
+      currentPage = pages;
+      loadTags();
+      return;
+    }
     if (data.items.length === 0) {
       body.innerHTML = '<tr><td colspan="4" class="empty">该分库暂无向量</td></tr>';
     } else {
@@ -520,7 +537,6 @@ async function loadTags() {
         </tr>`;
       }).join('');
     }
-    const pages = Math.max(1, Math.ceil(total / pageSize));
     $('pageInfo').textContent = `第 ${currentPage} / ${pages} 页`;
     $('pageTotal').textContent = `共 ${total} 条`;
     $('prevPage').disabled = currentPage <= 1;

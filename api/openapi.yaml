@@ -96,6 +96,105 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /scoops/{scoop}/tags:
+    parameters:
+      - $ref: '#/components/parameters/ScoopPath'
+    get:
+      tags: [scoops]
+      summary: 列出分库内全部 tag
+      description: 分页返回该 scoop 内的 tag 列表（含块数），供对账/清理使用。
+      operationId: listTags
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: 页码（从 1 起，默认 1）
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: page_size
+          in: query
+          required: false
+          description: 每页条数（默认 20，上限 100，超出自动钳制）
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: tag 列表（按插入顺序）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TagListResponse'
+              example:
+                total: 128
+                page: 1
+                page_size: 20
+                items:
+                  - tag: 3af2b489-b13a-42e4-af98-fe89d0e6b00e
+                    chunk_count: 4
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /scoops/{scoop}/tags/batch-delete:
+    post:
+      tags: [scoops]
+      summary: 批量删除
+      description: |
+        批量删除 tag（全部属于该 scoop）。逐条返回结果：不存在/归属其他分库
+        的 tag 标记为 deleted=false 并携带错误，不影响其他条目。单次上限 500 条。
+      operationId: batchDelete
+      parameters:
+        - $ref: '#/components/parameters/ScoopPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchDeleteRequest'
+            example:
+              tags:
+                - 11111111-1111-1111-1111-111111111111
+                - 22222222-2222-2222-2222-222222222222
+      responses:
+        '200':
+          description: 批量删除完成（逐条结果，顺序与请求一致）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchDeleteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus 指标
+      description: |
+        文本格式（Prometheus exposition format v0.0.4）。
+        指标前缀 rag_，gauge（规模/就绪）在 scrape 时实时读取。
+      operationId: getMetrics
+      responses:
+        '200':
+          description: 指标文本
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP rag_embedder_ready 嵌入模型是否就绪（0/1）
+                # TYPE rag_embedder_ready gauge
+                rag_embedder_ready 1
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /scoops/{scoop}/tags/batch:
     post:
       tags: [scoops]
@@ -358,6 +457,73 @@ components:
           minimum: 0
           maximum: 1
           description: 相似度（0~1），越高越相似
+
+    TagListResponse:
+      type: object
+      required: [total, page, page_size, items]
+      properties:
+        total:
+          type: integer
+          description: 该分库 tag 总数
+        page:
+          type: integer
+          description: 当前页码（从 1 起）
+        page_size:
+          type: integer
+          description: 每页条数
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TagListItem'
+
+    TagListItem:
+      type: object
+      required: [tag, chunk_count]
+      properties:
+        tag:
+          type: string
+          format: uuid
+        chunk_count:
+          type: integer
+          minimum: 1
+          description: 该 tag 的块向量数（长文分块后 >1）
+
+    BatchDeleteRequest:
+      type: object
+      required: [tags]
+      properties:
+        tags:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: string
+            format: uuid
+
+    BatchDeleteResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          description: 逐条结果，顺序与请求一致
+          items:
+            $ref: '#/components/schemas/BatchDeleteItemResponse'
+
+    BatchDeleteItemResponse:
+      type: object
+      required: [tag, deleted, error]
+      properties:
+        tag:
+          type: string
+          format: uuid
+        deleted:
+          type: boolean
+          description: 是否成功删除
+        error:
+          type: string
+          nullable: true
+          description: null 表示成功；否则为该条失败原因（如不存在、归属其他分库）
 
     ScoopStats:
       type: object
