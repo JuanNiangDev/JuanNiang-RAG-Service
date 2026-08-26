@@ -143,6 +143,9 @@ Prometheus 采集配置（`scrape_interval: 15s`，`metrics_path: /metrics`）�
 写入失败率（`rate(rag_write_errors_total[5m])`）、各分库规模（`rag_tags` / `rag_chunks`）、
 嵌入模型就绪告警（`rag_embedder_ready == 0`）。指标全量语义见 README「监控指标」节。
 
+**现成面板**：`deployment/grafana/rag-dashboard.json`（6 组 25 面板：状态/检索/写入/嵌入/HTTP/存储趋势），
+Grafana → Import 上传后选择 Prometheus 数据源即可用。
+
 > ⚠️ `/metrics` 与 `/health` 同样无鉴权，公网暴露时请在部署层限制来源 IP。
 
 内存监控建议：`memory.rss_kb` 随库规模线性增长（10 万 tag ≈ 800MB–1GB），设定告警阈值；接近上限时评估 `RAG_STORE_RAW_VECTORS=false`（省 ~600MB，代价见下）。

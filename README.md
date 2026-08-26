@@ -115,6 +115,9 @@ curl localhost:3000/ | head   # 或直接浏览器访问
 Grafana 建议面板：检索 P95（`histogram_quantile(0.95, sum(rate(rag_search_duration_seconds_bucket[5m])) by (le, scoop))`）、
 写入失败率、各分库规模（`rag_tags`/`rag_chunks`）、嵌入模型就绪告警（`rag_embedder_ready == 0`）。
 
+**现成面板**：`deployment/grafana/rag-dashboard.json` 已覆盖上述全部指标（6 组 25 个面板），
+Grafana → Dashboards → New → Import → 上传该文件，数据源选 Prometheus 即可。
+
 ## 数据文件
 
 ```
