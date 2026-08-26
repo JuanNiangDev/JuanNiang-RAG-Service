@@ -50,6 +50,7 @@ RAG_STORE_RAW_VECTORS=true # 存原始向量，index.tvim 损坏可自愈
 | GET | `/scoops/{scoop}/tags/search?q=&k=&min_score=` | 检索（**限定在 scoop 内**），返回 tag 列表 + 分数（0~1） |
 | DELETE | `/scoops/{scoop}/tags/{tag}` | 删除 |
 | GET | `/health` | 健康检查 + 各分库 tag/块数量 |
+| GET | `/metrics` | Prometheus 指标（Grafana 采集，文本格式） |
 
 `scoop` 白名单：`knowledge` / `memory` / `groupmgr` / `plugin`（非法值 → 400；
 同一 tag 跨分库写入 → 409）。
@@ -70,6 +71,33 @@ cargo test                      # 单元测试（纯函数，不需要模型）
 RAG_MODEL_PATH=models/bge-small-zh-v1.5-q8_0.gguf cargo test -- --ignored   # 需要模型
 cargo run --release --example bench   # 基准三件套
 ```
+
+## 监控指标（Prometheus / Grafana）
+
+`GET /metrics` 输出 Prometheus 文本格式指标（前缀 `rag_`，无鉴权）：
+
+| 指标 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `rag_http_requests_total` | counter | method/path/status | HTTP 请求数（path 为路由模板，低基数） |
+| `rag_http_request_duration_seconds` | histogram | method/path | HTTP 请求耗时 |
+| `rag_search_total` / `rag_search_duration_seconds` / `rag_search_hits_total` / `rag_search_errors_total` | counter/histogram | scoop | 检索量/耗时/命中数分布/错误 |
+| `rag_write_total` / `rag_write_duration_seconds` / `rag_write_errors_total` | counter/histogram | op(upsert/batch/delete)/scoop | 写入量/耗时/失败 |
+| `rag_write_chunks_total` | counter | scoop | 写入块向量累计 |
+| `rag_embed_requests_total` / `rag_embed_texts_total` / `rag_embed_duration_seconds` / `rag_embed_errors_total` | counter/histogram | — | 嵌入吞吐/耗时/失败 |
+| `rag_tags` / `rag_chunks` | gauge | scoop | 各分库规模（scrape 时实时） |
+| `rag_embedder_ready` | gauge | — | 嵌入模型就绪（0/1） |
+
+```yaml
+# Prometheus scrape_configs 示例
+- job_name: juan-niang-rag
+  scrape_interval: 15s
+  static_configs:
+    - targets: ['127.0.0.1:3000']
+    metrics_path: /metrics
+```
+
+Grafana 建议面板：检索 P95（`histogram_quantile(0.95, sum(rate(rag_search_duration_seconds_bucket[5m])) by (le, scoop))`）、
+写入失败率、各分库规模（`rag_tags`/`rag_chunks`）、嵌入模型就绪告警（`rag_embedder_ready == 0`）。
 
 ## 数据文件
 

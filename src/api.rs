@@ -51,10 +51,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/info", get(info))
+        .route("/metrics", get(crate::metrics::metrics))
         .route("/scoops/{scoop}/tags/{tag}", put(upsert).delete(delete_tag))
         .route("/scoops/{scoop}/tags/batch", post(batch_upsert))
         .route("/scoops/{scoop}/tags/search", get(search))
         .with_state(state)
+        // HTTP 请求指标（请求数/耗时，path 用路由模板保持低基数）
+        .layer(axum::middleware::from_fn(crate::metrics::http_metrics))
 }
 
 // ---------- 请求/响应类型 ----------
@@ -256,6 +259,11 @@ async fn search(
         return Err(AppError::bad_request("q 不能为空"));
     }
     let k = params.k.clamp(1, 100);
+    // 检索指标（scoop 低基数标签）
+    crate::metrics::search_total()
+        .with_label_values(&[scoop.as_str()])
+        .inc();
+    let start = std::time::Instant::now();
 
     // 1. 查询向量（LRU 缓存命中免推理）
     // 注意：MutexGuard 不能跨 await，命中分支的守卫随语句结束释放，
@@ -270,7 +278,15 @@ async fn search(
         if let Some(v) = cached {
             v
         } else {
-            let (vectors, _) = state.embedder.embed(vec![params.q.clone()], true).await?;
+            let vectors = match state.embedder.embed(vec![params.q.clone()], true).await {
+                Ok((v, _)) => v,
+                Err(e) => {
+                    crate::metrics::search_errors()
+                        .with_label_values(&[scoop.as_str()])
+                        .inc();
+                    return Err(AppError(ServiceError::Embed(e)));
+                }
+            };
             let v = vectors
                 .into_iter()
                 .next()
@@ -289,6 +305,12 @@ async fn search(
     let k_chunks = (k * 3).max(30); // 多召回一些块再聚合，避免同一 tag 霸榜
     let hits = snap.index.search(&query_vec, k_chunks);
     let results = aggregate(&hits, &snap.chunk_owner, k, params.min_score);
+    crate::metrics::search_duration()
+        .with_label_values(&[scoop.as_str()])
+        .observe(start.elapsed().as_secs_f64());
+    crate::metrics::search_hits()
+        .with_label_values(&[scoop.as_str()])
+        .observe(results.len() as f64);
     Ok(Json(SearchResponse { results }))
 }
 

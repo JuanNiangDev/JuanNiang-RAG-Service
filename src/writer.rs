@@ -211,20 +211,45 @@ impl WriterTask {
         tag: Uuid,
         text: String,
     ) -> Result<WriteStats, ServiceError> {
-        let (chunks, vectors, truncated) = self.prepare_chunks(std::slice::from_ref(&text)).await?;
-        let chunks = chunks.into_iter().next().unwrap_or_default();
-        let vectors = vectors.into_iter().next().unwrap_or_default();
-        let truncated = truncated.into_iter().next().unwrap_or(false);
-        if vectors.is_empty() {
-            return Err(ServiceError::BadRequest("文本为空或分块后无内容".into()));
+        let start = std::time::Instant::now();
+        let result: Result<WriteStats, ServiceError> = async {
+            let (chunks, vectors, truncated) =
+                self.prepare_chunks(std::slice::from_ref(&text)).await?;
+            let chunks = chunks.into_iter().next().unwrap_or_default();
+            let vectors = vectors.into_iter().next().unwrap_or_default();
+            let truncated = truncated.into_iter().next().unwrap_or(false);
+            if vectors.is_empty() {
+                return Err(ServiceError::BadRequest("文本为空或分块后无内容".into()));
+            }
+            let n = self.stores.upsert(scoop, tag, &chunks, &vectors)?;
+            self.commit(scoop)?;
+            debug!(scoop = %scoop, tag = %tag, chunks = n, "upsert 完成");
+            Ok(WriteStats {
+                chunk_count: n,
+                truncated,
+            })
         }
-        let n = self.stores.upsert(scoop, tag, &chunks, &vectors)?;
-        self.commit(scoop)?;
-        debug!(scoop = %scoop, tag = %tag, chunks = n, "upsert 完成");
-        Ok(WriteStats {
-            chunk_count: n,
-            truncated,
-        })
+        .await;
+        // 指标
+        crate::metrics::write_total()
+            .with_label_values(&["upsert", scoop.as_str()])
+            .inc();
+        crate::metrics::write_duration()
+            .with_label_values(&["upsert", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        match &result {
+            Ok(ws) => {
+                crate::metrics::write_chunks()
+                    .with_label_values(&[scoop.as_str()])
+                    .inc_by(ws.chunk_count as u64);
+            }
+            Err(_) => {
+                crate::metrics::write_errors()
+                    .with_label_values(&["upsert", scoop.as_str()])
+                    .inc();
+            }
+        }
+        result
     }
 
     /// 批量 upsert：所有条目合并成一次嵌入，整批一次持久化+发布
@@ -233,6 +258,7 @@ impl WriterTask {
         scoop: Scoop,
         items: Vec<(Uuid, String)>,
     ) -> Vec<Result<WriteStats, ServiceError>> {
+        let start = std::time::Instant::now();
         let mut results = Vec::with_capacity(items.len());
         if items.is_empty() {
             return results;
@@ -284,14 +310,51 @@ impl WriterTask {
             warn!(scoop = %scoop, "批量持久化失败: {e}");
         }
         info!(scoop = %scoop, n = items.len(), "批量 upsert 完成");
+        // 指标（op=batch：一次批量 = 一次写操作，逐条结果计入块数/错误）
+        crate::metrics::write_total()
+            .with_label_values(&["batch", scoop.as_str()])
+            .inc();
+        crate::metrics::write_duration()
+            .with_label_values(&["batch", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        for r in &results {
+            match r {
+                Ok(ws) => {
+                    crate::metrics::write_chunks()
+                        .with_label_values(&[scoop.as_str()])
+                        .inc_by(ws.chunk_count as u64);
+                }
+                Err(_) => {
+                    crate::metrics::write_errors()
+                        .with_label_values(&["batch", scoop.as_str()])
+                        .inc();
+                }
+            }
+        }
         results
     }
 
     fn apply_delete(&mut self, scoop: Scoop, tag: Uuid) -> Result<(), ServiceError> {
-        self.stores.delete(scoop, tag)?;
-        self.commit(scoop)?;
-        info!(scoop = %scoop, tag = %tag, "删除完成");
-        Ok(())
+        let start = std::time::Instant::now();
+        let result = (|| -> Result<(), ServiceError> {
+            self.stores.delete(scoop, tag)?;
+            self.commit(scoop)?;
+            info!(scoop = %scoop, tag = %tag, "删除完成");
+            Ok(())
+        })();
+        // 指标
+        crate::metrics::write_total()
+            .with_label_values(&["delete", scoop.as_str()])
+            .inc();
+        crate::metrics::write_duration()
+            .with_label_values(&["delete", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        if result.is_err() {
+            crate::metrics::write_errors()
+                .with_label_values(&["delete", scoop.as_str()])
+                .inc();
+        }
+        result
     }
 
     /// 分块 + 批量嵌入。返回 (每文本的块列表, 每文本的向量列表, 每文本是否有截断)

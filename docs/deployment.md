@@ -135,7 +135,15 @@ systemctl start rag-service
 |---|---|
 | `GET /health` | 存活 + 各分库 tag/块规模（`scoops.<name>.{tags,chunks}`） |
 | `GET /info` | 模型就绪状态、进程内存（`memory.rss_kb`）、各分库规模 |
+| `GET /metrics` | Prometheus 指标（Grafana 采集，前缀 `rag_`，无鉴权） |
 | 日志 | 启动/预热/写入/删除事件；"触发重建"提示索引自愈 |
+
+Prometheus 采集配置（`scrape_interval: 15s`，`metrics_path: /metrics`）；建议 Grafana 面板：
+检索 P95 耗时（`histogram_quantile(0.95, sum(rate(rag_search_duration_seconds_bucket[5m])) by (le, scoop))`）、
+写入失败率（`rate(rag_write_errors_total[5m])`）、各分库规模（`rag_tags` / `rag_chunks`）、
+嵌入模型就绪告警（`rag_embedder_ready == 0`）。指标全量语义见 README「监控指标」节。
+
+> ⚠️ `/metrics` 与 `/health` 同样无鉴权，公网暴露时请在部署层限制来源 IP。
 
 内存监控建议：`memory.rss_kb` 随库规模线性增长（10 万 tag ≈ 800MB–1GB），设定告警阈值；接近上限时评估 `RAG_STORE_RAW_VECTORS=false`（省 ~600MB，代价见下）。
 

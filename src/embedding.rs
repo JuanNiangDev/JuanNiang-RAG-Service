@@ -111,15 +111,28 @@ impl Embedder {
         texts: Vec<String>,
         is_query: bool,
     ) -> Result<(Vec<Vec<f32>>, Vec<bool>), EmbedError> {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Request::Embed {
-                texts,
-                is_query,
-                reply: reply_tx,
-            })
-            .map_err(|_| EmbedError::ChannelClosed)?;
-        reply_rx.await.map_err(|_| EmbedError::ChannelClosed)?
+        let start = std::time::Instant::now();
+        let n = texts.len();
+        let result = async {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(Request::Embed {
+                    texts,
+                    is_query,
+                    reply: reply_tx,
+                })
+                .map_err(|_| EmbedError::ChannelClosed)?;
+            reply_rx.await.map_err(|_| EmbedError::ChannelClosed)?
+        }
+        .await;
+        // 指标（嵌入请求/文本条数/耗时/失败）
+        crate::metrics::embed_requests().inc();
+        crate::metrics::embed_texts().inc_by(n as u64);
+        crate::metrics::embed_duration().observe(start.elapsed().as_secs_f64());
+        if result.is_err() {
+            crate::metrics::embed_errors().inc();
+        }
+        result
     }
 
     /// 查询嵌入线程状态（模型名/维度/线程数等）

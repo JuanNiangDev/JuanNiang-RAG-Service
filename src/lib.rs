@@ -5,6 +5,7 @@ pub mod chunker;
 pub mod config;
 pub mod embedding;
 pub mod error;
+pub mod metrics;
 pub mod search;
 pub mod store;
 pub mod vector_index;

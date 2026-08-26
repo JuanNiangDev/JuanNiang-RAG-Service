@@ -20,6 +20,7 @@ bincode = "1"             # tags.bin 快照序列化
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"           # 错误类型 derive
 lru = "0.12"              # 查询 embedding 缓存
+prometheus = "0.14"       # Prometheus 指标（Grafana 采集 /metrics）
 
 [dev-dependencies]
 rand = "0.8"              # 基准/测试合成数据
