@@ -3,146 +3,495 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JuanNiang RAG-Service 控制台</title>
+<title>JuanNiang · 向量控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#0f1420; --card:#1a2233; --border:#2a3650; --text:#dbe4f5; --dim:#8fa0bf;
-          --accent:#4f8cff; --ok:#3fb98a; --err:#e5534b; --warn:#e0b341; }
-  * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; padding:20px; }
-  .banner { background:#3a2b12; border:1px solid var(--warn); color:var(--warn); padding:8px 14px;
-            border-radius:8px; margin-bottom:16px; font-size:13px; }
-  h1 { font-size:20px; margin-bottom:4px; }
-  .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
-  .card .label { color:var(--dim); font-size:12px; }
-  .card .value { font-size:20px; font-weight:700; margin-top:2px; }
-  .card .value.small { font-size:14px; }
-  .ok { color:var(--ok); } .err { color:var(--err); } .dim { color:var(--dim); }
-  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
-  .tab { padding:6px 16px; border-radius:8px; border:1px solid var(--border); background:var(--card);
-         cursor:pointer; font-size:13px; user-select:none; }
-  .tab.active { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
-  .btn { padding:6px 14px; border-radius:8px; border:1px solid var(--border); background:var(--card);
-         color:var(--text); cursor:pointer; font-size:13px; }
-  .btn:hover { border-color:var(--accent); }
-  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .btn.danger { background:transparent; border-color:var(--err); color:var(--err); }
-  .btn:disabled { opacity:.45; cursor:not-allowed; }
-  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--border);
-          border-radius:10px; overflow:hidden; }
-  th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--border); font-size:13px; }
-  th { color:var(--dim); font-weight:600; background:#1e293b; }
-  tr:last-child td { border-bottom:none; }
-  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; }
-  .pager { display:flex; gap:8px; align-items:center; margin-top:12px; color:var(--dim); font-size:13px; }
-  .pager .btn { padding:4px 10px; }
-  .form { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; margin-top:16px; }
-  .form h3 { font-size:14px; margin-bottom:10px; }
-  .form-row { display:flex; gap:10px; margin-bottom:10px; flex-wrap:wrap; align-items:center; }
-  .form-row label { color:var(--dim); font-size:12px; min-width:52px; }
-  input[type=text], textarea { background:#0f1729; border:1px solid var(--border); border-radius:6px;
-          color:var(--text); padding:6px 10px; font-size:13px; font-family:inherit; }
-  textarea { width:100%; min-height:60px; resize:vertical; }
-  input[type=text] { flex:1; min-width:160px; }
-  .msg { margin-top:10px; font-size:13px; }
-  .msg.ok { color:var(--ok); } .msg.err { color:var(--err); }
-  .empty { padding:24px; text-align:center; color:var(--dim); }
-  .check { width:16px; height:16px; accent-color:var(--accent); }
+  :root {
+    --bg:        #0d1117;
+    --bg-2:      #11161e;
+    --panel:     #161c26;
+    --panel-2:  #1d242f;
+    --border:    #283142;
+    --border-2:  #39435570;
+    --text:      #dce3ee;
+    --text-2:    #b6c0d0;
+    --dim:       #7c8898;
+    --faint:     #555f70;
+    --accent:    #4f8fd0;
+    --accent-2:  #3a6fa8;
+    --glow:      rgba(79,143,208,.18);
+    --ok:        #4fbf80;
+    --err:       #e0675b;
+    --warn:      #e0a558;
+    --r:         10px;
+    --r-sm:      7px;
+    --shadow:    0 1px 0 rgba(255,255,255,.02), 0 10px 30px -16px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+
+  body {
+    background:
+      radial-gradient(1100px 560px at 85% -10%, rgba(79,143,208,.06), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font: 14px/1.6 "IBM Plex Sans", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+  }
+
+  .shell { max-width: 1020px; margin: 0 auto; padding: 30px 26px 72px; }
+
+  /* ---------- 顶部 ---------- */
+  .masthead {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; margin-bottom: 18px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .logo {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center; color: #fff; flex: none;
+    box-shadow: 0 0 18px var(--glow);
+  }
+  .brand .logo svg { width: 17px; height: 17px; }
+  .brand h1 { font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+  .brand .tag {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--faint);
+    letter-spacing: .1em; text-transform: uppercase; margin-left: 2px;
+  }
+
+  .pulse {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: "IBM Plex Mono", monospace; font-size: 11.5px;
+    padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border-2);
+    background: var(--panel); color: var(--dim);
+  }
+  .pulse .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+  .pulse.ok { color: var(--ok); border-color: rgba(79,191,128,.35); }
+  .pulse.ok .dot { background: var(--ok); animation: pulse 2.2s infinite; }
+  .pulse.err { color: var(--err); border-color: rgba(224,103,91,.35); }
+  .pulse.err .dot { background: var(--err); }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(79,191,128,.5)} 70%{box-shadow:0 0 0 6px rgba(79,191,128,0)} 100%{box-shadow:0 0 0 0 rgba(79,191,128,0)} }
+
+  /* ---------- 安全横幅（单行） ---------- */
+  .banner {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(224,165,88,.07); border: 1px solid rgba(224,165,88,.3);
+    border-left: 3px solid var(--warn); color: var(--warn);
+    padding: 7px 12px; border-radius: var(--r-sm); margin-bottom: 20px; font-size: 12.5px;
+  }
+
+  /* ---------- Tab 导航 ---------- */
+  .nav {
+    display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 22px;
+  }
+  .nav button {
+    appearance: none; background: transparent; border: none; cursor: pointer;
+    color: var(--dim); font: 500 14px "IBM Plex Sans", sans-serif;
+    padding: 11px 18px; display: flex; align-items: center; gap: 8px;
+    position: relative; transition: color .15s;
+  }
+  .nav button:hover { color: var(--text-2); }
+  .nav button.active { color: var(--text); }
+  .nav button.active::after {
+    content: ""; position: absolute; left: 14px; right: 14px; bottom: -1px; height: 2px;
+    background: var(--accent); border-radius: 2px 2px 0 0; box-shadow: 0 0 10px var(--glow);
+  }
+  .nav button svg { width: 15px; height: 15px; }
+
+  .view { display: none; }
+  .view.active { display: block; animation: fade .25s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  /* ---------- 状态页 ---------- */
+  .hero-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 14px; margin-bottom: 26px; }
+  .hero {
+    position: relative; background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 18px; box-shadow: var(--shadow); overflow: hidden;
+  }
+  .hero::after {
+    content: ""; position: absolute; right: -30px; top: -30px; width: 110px; height: 110px;
+    background: radial-gradient(circle, var(--glow), transparent 70%); pointer-events: none;
+  }
+  .hero .ico {
+    width: 38px; height: 38px; border-radius: 9px; background: var(--bg-2);
+    border: 1px solid var(--border); display: grid; place-items: center; color: var(--accent);
+    margin-bottom: 14px;
+  }
+  .hero .ico svg { width: 20px; height: 20px; }
+  .hero .label {
+    font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint);
+  }
+  .hero .value {
+    font-family: "IBM Plex Mono", monospace; font-size: 22px; font-weight: 600;
+    margin: 4px 0 2px; letter-spacing: -.01em;
+  }
+  .hero .value.small { font-size: 16px; }
+  .hero .sub { font-size: 12px; color: var(--dim); }
+  .ok { color: var(--ok); } .err { color: var(--err); } .dim { color: var(--dim); } .accent { color: var(--accent); }
+
+  .section-title {
+    display: flex; align-items: center; gap: 8px; margin: 0 0 12px 2px;
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--faint);
+  }
+  .section-title .line { flex: 1; height: 1px; background: var(--border); }
+
+  .scoop-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap: 12px; }
+  .scard {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--r);
+    padding: 15px 16px; display: flex; align-items: flex-start; gap: 12px; transition: border-color .15s, transform .15s;
+  }
+  .scard:hover { border-color: var(--border-2); transform: translateY(-2px); }
+  .scard .ico {
+    width: 32px; height: 32px; border-radius: 8px; background: var(--bg-2);
+    display: grid; place-items: center; color: var(--accent); flex: none;
+  }
+  .scard .ico svg { width: 17px; height: 17px; }
+  .scard .name { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--text); font-weight: 500; }
+  .scard .nums { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--dim); margin-top: 3px; }
+  .scard .nums b { color: var(--text-2); font-weight: 500; }
+
+  /* ---------- 分库子标签 ---------- */
+  .scoops { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .scoop {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px;
+    padding: 6px 13px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text-2);
+    transition: all .15s; user-select: none;
+  }
+  .scoop:hover { border-color: var(--border-2); color: var(--text); }
+  .scoop.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .scoop .cnt { opacity: .6; margin-left: 6px; }
+
+  /* ---------- 工具条 / 按钮 ---------- */
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .btn {
+    appearance: none; font: 500 13px "IBM Plex Sans", sans-serif;
+    padding: 7px 14px; border-radius: var(--r-sm); cursor: pointer;
+    border: 1px solid var(--border-2); background: var(--panel); color: var(--text);
+    transition: all .14s; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn svg { width: 14px; height: 14px; }
+  .btn:hover { border-color: var(--accent); color: var(--text); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: #5a9ce0; border-color: #5a9ce0; }
+  .btn.danger { background: transparent; border-color: rgba(224,103,91,.4); color: var(--err); }
+  .btn.danger:hover { background: rgba(224,103,91,.1); border-color: var(--err); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn.ghost { background: transparent; }
+  .dim.mono { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--dim); }
+
+  /* ---------- 表格 ---------- */
+  .table-wrap { border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; background: var(--panel); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th {
+    font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 500;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--faint); background: var(--bg-2);
+  }
+  tr:last-child td { border-bottom: none; }
+  tbody tr { transition: background .1s; }
+  tbody tr:hover { background: rgba(79,143,208,.045); }
+  .mono { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; }
+  .chip {
+    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 11px;
+    padding: 1px 7px; border-radius: 4px; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border);
+  }
+  .empty { padding: 28px; text-align: center; color: var(--dim); font-size: 13px; }
+  .empty.err { color: var(--err); }
+  .check { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+
+  .pager {
+    display: flex; gap: 10px; align-items: center; justify-content: space-between;
+    margin-top: 14px; color: var(--dim); font-size: 12.5px; font-family: "IBM Plex Mono", monospace;
+  }
+  .pager .pages { display: flex; gap: 8px; align-items: center; }
+  .pager .btn { padding: 5px 11px; }
+
+  /* ---------- 面板 / 表单 ---------- */
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r); padding: 18px 20px; box-shadow: var(--shadow); margin-bottom: 20px; }
+  .panel h3 { font-size: 15px; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .panel h3 svg { width: 16px; height: 16px; color: var(--accent); }
+  .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .field label { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+  input[type=text], input[type=number], textarea {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+    color: var(--text); padding: 9px 12px; font: 14px "IBM Plex Sans", sans-serif; width: 100%;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow); }
+  textarea { min-height: 90px; resize: vertical; font-family: "IBM Plex Mono", monospace; font-size: 13px; line-height: 1.55; }
+  .field-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .field-row .field { flex: 1; min-width: 180px; margin-bottom: 14px; }
+  .field-row .field.small { flex: 0 0 130px; min-width: 130px; }
+  .field-row .btn { margin-bottom: 14px; }
+  .msg { margin-top: 4px; font-size: 12.5px; font-family: "IBM Plex Mono", monospace; }
+  .msg.ok { color: var(--ok); } .msg.err { color: var(--err); }
+
+  /* ---------- 检索折叠 ---------- */
+  details.disclosure { margin-bottom: 18px; }
+  details.disclosure > summary {
+    cursor: pointer; list-style: none; color: var(--dim); font-size: 13px;
+    padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-sm);
+    display: flex; align-items: center; gap: 8px; transition: color .15s, border-color .15s;
+  }
+  details.disclosure > summary::-webkit-details-marker { display: none; }
+  details.disclosure > summary::before { content: "+"; font-family: "IBM Plex Mono", monospace; color: var(--accent); width: 12px; }
+  details.disclosure[open] > summary::before { content: "−"; }
+  details.disclosure > summary:hover { color: var(--text-2); border-color: var(--border-2); }
+  details.disclosure > summary svg { width: 15px; height: 15px; color: var(--accent); }
+  .disc-body { padding: 16px 0 0; }
+  .results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .hit {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 11px 15px;
+  }
+  .hit .rank { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--faint); letter-spacing: .08em; }
+  .hit .tag { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--text); word-break: break-all; }
+  .score { display: flex; align-items: center; gap: 10px; min-width: 180px; }
+  .score .bar { flex: 1; height: 6px; background: var(--bg-2); border-radius: 3px; overflow: hidden; border: 1px solid var(--border); }
+  .score .bar > span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 3px; transition: width .8s cubic-bezier(.22,1,.36,1); }
+  .score .val { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--accent); min-width: 42px; text-align: right; }
+  .stat-line { display: flex; gap: 18px; flex-wrap: wrap; font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--dim); margin-top: 10px; }
+  .stat-line b { color: var(--text-2); font-weight: 500; }
+
+  /* ---------- Toast ---------- */
+  .toasts { position: fixed; bottom: 22px; right: 22px; z-index: 100; display: flex; flex-direction: column; gap: 8px; max-width: 340px; }
+  .toast {
+    display: flex; align-items: flex-start; gap: 10px; background: var(--panel-2);
+    border: 1px solid var(--border-2); border-left: 3px solid var(--accent); border-radius: var(--r-sm);
+    padding: 10px 14px; box-shadow: 0 12px 28px -12px rgba(0,0,0,.6); font-size: 13px; animation: slideIn .3s cubic-bezier(.22,1,.36,1);
+  }
+  .toast.ok { border-left-color: var(--ok); } .toast.err { border-left-color: var(--err); }
+  .toast .t-ico { font-family: "IBM Plex Mono", monospace; font-weight: 600; }
+  .toast.ok .t-ico { color: var(--ok); } .toast.err .t-ico { color: var(--err); }
+  .toast .t-body { flex: 1; color: var(--text-2); }
+  .toast.fade { animation: slideOut .3s forwards; }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+  @keyframes slideOut { to { opacity: 0; transform: translateX(20px); } }
+
+  @media (max-width: 640px) {
+    .shell { padding: 20px 14px 56px; }
+    .hit { grid-template-columns: 1fr; } .score { min-width: 0; }
+    th, td { padding: 8px 10px; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
-<div class="banner">⚠ 无鉴权管理控制台——可直接增删向量数据，仅限本机/内网使用，请勿暴露公网。</div>
-<h1>JuanNiang RAG-Service 控制台</h1>
-<div class="sub">简易管理界面 · API 见 docs/API.md · 指标见 /metrics</div>
+<div class="shell">
 
-<div class="cards" id="statusCards"></div>
+  <header class="masthead">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z" opacity=".3"/><path d="M8 8h8v8H8z"/><path d="M2 9h2M2 15h2M20 9h2M20 15h2M9 2v2M15 2v2M9 20v2M15 20v2"/></svg></div>
+      <div>
+        <h1>JuanNiang 向量控制台 <span class="tag">RAG</span></h1>
+      </div>
+    </div>
+    <div class="pulse" id="livePill"><span class="dot"></span><span id="liveText">连接中</span></div>
+  </header>
 
-<div class="tabs" id="scoopTabs"></div>
+  <div class="banner">⚠ 无鉴权控制台 · 仅限本机/内网使用，请勿暴露公网</div>
 
-<div class="toolbar">
-  <button class="btn" onclick="loadTags()">刷新列表</button>
-  <button class="btn danger" id="btnBatchDelete" onclick="batchDelete()" disabled>批量删除所选</button>
-  <span class="dim" id="selCount"></span>
+  <nav class="nav">
+    <button class="active" data-view="status" onclick="switchView('status')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v18M3 12h18" opacity=".3"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="9"/></svg>状态</button>
+    <button data-view="list" onclick="switchView('list')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>向量列表</button>
+    <button data-view="add" onclick="switchView('add')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 5v14M5 12h14"/></svg>添加向量</button>
+  </nav>
+
+  <!-- ═════ 状态 ═════ -->
+  <section id="view-status" class="view active">
+    <div class="hero-cards" id="heroCards"></div>
+    <div class="section-title">分库 <span class="line"></span></div>
+    <div class="scoop-cards" id="scoopCards"></div>
+  </section>
+
+  <!-- ═════ 向量列表 ═════ -->
+  <section id="view-list" class="view">
+    <div class="scoops" id="scoopTabs"></div>
+
+    <details class="disclosure">
+      <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>语义检索</summary>
+      <div class="disc-body">
+        <div class="field-row">
+          <div class="field" style="margin-bottom:0"><input type="text" id="searchQ" placeholder="查询文本…"></div>
+          <div class="field small" style="margin-bottom:0"><label>Top-K</label><input type="number" id="searchK" value="10" min="1" max="100"></div>
+          <button class="btn primary" onclick="doSearch()" id="searchBtn">检索</button>
+        </div>
+        <div class="stat-line" id="searchStat"></div>
+        <div class="results" id="searchResults"><div class="empty">输入查询文本后检索</div></div>
+      </div>
+    </details>
+
+    <div class="toolbar">
+      <button class="btn ghost" onclick="loadTags()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>刷新</button>
+      <button class="btn danger" id="btnBatchDelete" onclick="batchDelete()" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>批量删除</button>
+      <span class="dim mono" id="selCount"></span>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th style="width:34px"><input type="checkbox" class="check" id="checkAll" onchange="toggleAll()" aria-label="全选"></th>
+          <th>UUID · tag</th><th style="width:90px">块数</th><th style="width:88px">操作</th>
+        </tr></thead>
+        <tbody id="tagBody"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="pager">
+      <div class="pages">
+        <button class="btn" id="prevPage" onclick="gotoPage(-1)" disabled>‹ 上一页</button>
+        <span id="pageInfo">—</span>
+        <button class="btn" id="nextPage" onclick="gotoPage(1)" disabled>下一页 ›</button>
+      </div>
+      <span id="pageTotal"></span>
+    </div>
+  </section>
+
+  <!-- ═════ 添加向量 ═════ -->
+  <section id="view-add" class="view">
+    <div class="panel">
+      <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 5v14M5 12h14"/></svg>写入 / 更新向量</h3>
+      <div class="field">
+        <label>文本内容</label>
+        <textarea id="addText" placeholder="要入库的文本（长文自动分块）"></textarea>
+      </div>
+      <div class="field-row">
+        <div class="field" style="margin-bottom:0">
+          <label>Tag（可选，留空自动生成）</label>
+          <input type="text" id="addTag" placeholder="00000000-0000-0000-0000-000000000000">
+        </div>
+        <button class="btn primary" onclick="addVector()">写入</button>
+      </div>
+      <div class="msg" id="addMsg"></div>
+    </div>
+
+    <details class="disclosure">
+      <summary>批量导入</summary>
+      <div class="disc-body">
+        <div class="field">
+          <textarea id="batchText" placeholder="每行一条文本，自动生成 UUID tag" style="min-height:110px"></textarea>
+        </div>
+        <button class="btn primary" onclick="batchUpsert()">批量写入</button>
+        <span class="msg" id="batchMsg" style="margin-left:12px"></span>
+      </div>
+    </details>
+  </section>
+
 </div>
 
-<table id="tagTable">
-  <thead><tr>
-    <th style="width:32px"><input type="checkbox" class="check" id="checkAll" onchange="toggleAll()"></th>
-    <th>UUID（tag）</th><th>块数</th><th style="width:80px">操作</th>
-  </tr></thead>
-  <tbody id="tagBody"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
-</table>
-
-<div class="pager">
-  <button class="btn" id="prevPage" onclick="gotoPage(-1)" disabled>上一页</button>
-  <span id="pageInfo">-</span>
-  <button class="btn" id="nextPage" onclick="gotoPage(1)" disabled>下一页</button>
-</div>
-
-<div class="form">
-  <h3>添加 / 更新向量（upsert，同 tag 覆盖）</h3>
-  <div class="form-row"><label>文本</label>
-    <textarea id="addText" placeholder="要入库的文本内容（长文服务端自动分块）"></textarea>
-  </div>
-  <div class="form-row"><label>Tag</label>
-    <input type="text" id="addTag" placeholder="留空自动生成 UUID">
-    <button class="btn primary" onclick="addVector()">添加</button>
-  </div>
-  <div class="msg" id="addMsg"></div>
-</div>
+<div class="toasts" id="toasts"></div>
 
 <script>
 const SCOOPS = ['knowledge', 'memory', 'groupmgr', 'plugin'];
 let currentScoop = 'knowledge';
+let currentView = 'status';
 let currentPage = 1;
 const pageSize = 20;
 let total = 0;
 let selected = new Set();
 
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const uuid = () => crypto.randomUUID();
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const fmtMem = (kb) => kb ? (kb / 1024).toFixed(0) + ' MB' : 'N/A';
+
+// 内联图标
+const ICON = {
+  chip:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 6V3M15 6V3M9 21v-3M15 21v-3M6 9H3M6 15H3M21 9h-3M21 15h-3"/></svg>',
+  ram:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="8" width="18" height="10" rx="2"/><path d="M7 18v3M12 18v3M17 18v3M8 12v2M12 12v2M16 12v2"/></svg>',
+  db:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>',
+};
+
+function toast(text, kind = '') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + kind;
+  const ico = kind === 'ok' ? '✓' : kind === 'err' ? '✕' : '·';
+  t.innerHTML = `<span class="t-ico">${ico}</span><span class="t-body"></span>`;
+  t.querySelector('.t-body').textContent = text;
+  $('toasts').appendChild(t);
+  setTimeout(() => { t.classList.add('fade'); setTimeout(() => t.remove(), 300); }, 3400);
+}
+
 async function api(path, opts = {}) {
-  const resp = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  });
+  const resp = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
   if (!resp.ok) {
-    let detail = '';
-    try { detail = (await resp.json()).error || ''; } catch {}
+    let detail = ''; try { detail = (await resp.json()).error || ''; } catch {}
     throw new Error(`HTTP ${resp.status}${detail ? ': ' + detail : ''}`);
   }
   return resp.json();
 }
 
-// ---------- 基础信息 ----------
+/* ---------- 视图切换 ---------- */
+function switchView(v) {
+  currentView = v;
+  document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  document.querySelectorAll('.view').forEach(s => s.classList.toggle('active', s.id === 'view-' + v));
+  if (v === 'list') loadTags();
+}
+
+/* ---------- 状态页 ---------- */
 async function loadInfo() {
   try {
     const info = await api('/info');
-    const m = info.model, mem = info.memory, sc = info.scoops || {};
-    let cards = '';
-    cards += `<div class="card"><div class="label">模型状态</div>
-      <div class="value ${m.ready ? 'ok' : 'err'}">${m.ready ? '就绪' : '未就绪'}</div>
-      <div class="dim" style="font-size:11px">${m.model_name || '-'} · ${m.dim || '-'} 维 · ${m.n_threads || '-'} 线程</div></div>`;
-    cards += `<div class="card"><div class="label">进程内存</div>
-      <div class="value small">${mem ? (mem.rss_kb / 1024).toFixed(0) + ' MB' : 'N/A'}</div>
-      <div class="dim" style="font-size:11px">RSS</div></div>`;
-    for (const s of SCOOPS) {
+    const m = info.model || {}, mem = info.memory, sc = info.scoops || {};
+
+    const pill = $('livePill');
+    pill.className = 'pulse ' + (m.ready ? 'ok' : 'err');
+    $('liveText').textContent = m.ready ? '模型就绪' : '模型未就绪';
+
+    $('heroCards').innerHTML = `
+      <div class="hero">
+        <div class="ico">${ICON.chip}</div>
+        <div class="label">嵌入模型</div>
+        <div class="value small ${m.ready ? 'ok' : 'err'}">${esc(m.model_name || '—')}</div>
+        <div class="sub">${m.dim || '—'} 维 · ${m.n_threads || '—'} 线程</div>
+      </div>
+      <div class="hero">
+        <div class="ico">${ICON.ram}</div>
+        <div class="label">进程内存</div>
+        <div class="value">${mem ? fmtMem(mem.rss_kb) : 'N/A'}</div>
+        <div class="sub">RSS · 虚拟 ${mem ? fmtMem(mem.vsize_kb) : '—'}</div>
+      </div>`;
+
+    $('scoopCards').innerHTML = SCOOPS.map(s => {
       const st = sc[s] || { tags: 0, chunks: 0 };
-      cards += `<div class="card"><div class="label">分库 ${s}</div>
-        <div class="value small">${st.tags} tag · ${st.chunks} 块</div>
-        <div class="dim" style="font-size:11px">${st.tags > 0 ? (st.chunks / st.tags).toFixed(1) + ' 块/tag' : '-'}</div></div>`;
-    }
-    document.getElementById('statusCards').innerHTML = cards;
+      const avg = st.tags > 0 ? (st.chunks / st.tags).toFixed(1) + ' 块/tag' : '—';
+      return `<div class="scard">
+        <div class="ico">${ICON.db}</div>
+        <div>
+          <div class="name">${s}</div>
+          <div class="nums"><b>${st.tags}</b> tag · <b>${st.chunks}</b> 块</div>
+          <div class="dim" style="font-size:11px;margin-top:2px">${avg}</div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // 同步分库 tab 计数
+    initTabs(sc);
   } catch (e) {
-    document.getElementById('statusCards').innerHTML = `<div class="err">状态加载失败: ${e.message}</div>`;
+    $('livePill').className = 'pulse err';
+    $('liveText').textContent = '连接失败';
+    $('heroCards').innerHTML = `<div class="hero"><div class="label">状态</div><div class="err">加载失败: ${esc(e.message)}</div></div>`;
   }
 }
 
-// ---------- 分库 tabs ----------
-function initTabs() {
-  document.getElementById('scoopTabs').innerHTML = SCOOPS.map(s =>
-    `<div class="tab ${s === currentScoop ? 'active' : ''}" onclick="switchScoop('${s}')">${s}</div>`
-  ).join('');
+/* ---------- 分库 tabs ---------- */
+function initTabs(sc) {
+  if (!sc) { api('/info').then(i => initTabs(i.scoops || {})).catch(()=>{}); return; }
+  $('scoopTabs').innerHTML = SCOOPS.map(s => {
+    const st = (sc[s] || { tags: 0 });
+    return `<div class="scoop ${s === currentScoop ? 'active' : ''}" onclick="switchScoop('${s}')">${s}<span class="cnt">${st.tags}</span></div>`;
+  }).join('');
 }
 
 function switchScoop(s) {
@@ -150,9 +499,10 @@ function switchScoop(s) {
   initTabs(); loadTags();
 }
 
-// ---------- 列表 + 分页 ----------
+/* ---------- 列表 ---------- */
 async function loadTags() {
-  const body = document.getElementById('tagBody');
+  if (currentView !== 'list') return;
+  const body = $('tagBody');
   body.innerHTML = '<tr><td colspan="4" class="empty">加载中…</td></tr>';
   try {
     const data = await api(`/scoops/${currentScoop}/tags?page=${currentPage}&page_size=${pageSize}`);
@@ -165,17 +515,18 @@ async function loadTags() {
         return `<tr>
           <td><input type="checkbox" class="check" data-tag="${it.tag}" ${checked} onchange="toggleOne('${it.tag}')"></td>
           <td class="mono">${it.tag}</td>
-          <td>${it.chunk_count}</td>
+          <td><span class="chip">${it.chunk_count}</span></td>
           <td><button class="btn danger" onclick="deleteOne('${it.tag}')">删除</button></td>
         </tr>`;
       }).join('');
     }
     const pages = Math.max(1, Math.ceil(total / pageSize));
-    document.getElementById('pageInfo').textContent = `第 ${currentPage} / ${pages} 页 · 共 ${total} 条`;
-    document.getElementById('prevPage').disabled = currentPage <= 1;
-    document.getElementById('nextPage').disabled = currentPage >= pages;
+    $('pageInfo').textContent = `第 ${currentPage} / ${pages} 页`;
+    $('pageTotal').textContent = `共 ${total} 条`;
+    $('prevPage').disabled = currentPage <= 1;
+    $('nextPage').disabled = currentPage >= pages;
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="4" class="empty err">加载失败: ${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="4" class="empty err">加载失败: ${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -183,58 +534,49 @@ function gotoPage(delta) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const next = currentPage + delta;
   if (next < 1 || next > pages) return;
-  currentPage = next;
-  loadTags();
+  currentPage = next; loadTags();
 }
 
-// ---------- 选择 ----------
-function toggleOne(tag) {
-  if (selected.has(tag)) selected.delete(tag); else selected.add(tag);
-  updateSelectUI();
-}
-
+function toggleOne(t) { if (selected.has(t)) selected.delete(t); else selected.add(t); updateSelectUI(); }
 function toggleAll() {
-  const all = document.getElementById('checkAll').checked;
   selected.clear();
-  if (all) {
-    document.querySelectorAll('#tagBody input[type=checkbox]').forEach(cb => {
-      if (cb.dataset.tag) selected.add(cb.dataset.tag);
-    });
-  }
+  if ($('checkAll').checked) document.querySelectorAll('#tagBody input[type=checkbox]').forEach(cb => { if (cb.dataset.tag) selected.add(cb.dataset.tag); });
   updateSelectUI();
 }
-
 function updateSelectUI() {
   const n = selected.size;
-  document.getElementById('selCount').textContent = n ? `已选 ${n} 条` : '';
-  document.getElementById('btnBatchDelete').disabled = n === 0;
+  $('selCount').textContent = n ? `已选 ${n} 条` : '';
+  $('btnBatchDelete').disabled = n === 0;
 }
 
-// ---------- 增删 ----------
-function showMsg(text, ok) {
-  const el = document.getElementById('addMsg');
-  el.className = 'msg ' + (ok ? 'ok' : 'err');
-  el.textContent = text;
-}
+/* ---------- 增删 ---------- */
+function showMsg(el, t, ok) { el.className = 'msg ' + (ok ? 'ok' : 'err'); el.textContent = t; }
 
 async function addVector() {
-  const text = document.getElementById('addText').value.trim();
-  if (!text) { showMsg('请输入文本内容', false); return; }
-  let tag = document.getElementById('addTag').value.trim();
-  if (!tag) tag = crypto.randomUUID();
-  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(tag)) {
-    showMsg('Tag 必须是 UUID 格式（或留空自动生成）', false); return;
-  }
+  const text = $('addText').value.trim();
+  if (!text) { showMsg($('addMsg'), '请输入文本内容', false); return; }
+  let tag = $('addTag').value.trim() || uuid();
+  if (!UUID_RE.test(tag)) { showMsg($('addMsg'), 'Tag 必须是 UUID 格式', false); return; }
   try {
-    const r = await api(`/scoops/${currentScoop}/tags/${tag}`, {
-      method: 'PUT',
-      body: JSON.stringify({ text }),
-    });
-    showMsg(`已写入 ${currentScoop}/${tag}（${r.chunk_count} 块${r.truncated ? '，含截断' : ''}）`, true);
-    document.getElementById('addText').value = '';
-    document.getElementById('addTag').value = '';
-    loadInfo(); loadTags();
-  } catch (e) { showMsg('写入失败: ' + e.message, false); }
+    const r = await api(`/scoops/${currentScoop}/tags/${tag}`, { method: 'PUT', body: JSON.stringify({ text }) });
+    showMsg($('addMsg'), `已写入 ${r.chunk_count} 块${r.truncated ? ' · 含截断' : ''}`, true);
+    toast('写入成功', 'ok');
+    $('addText').value = ''; $('addTag').value = '';
+    loadInfo();
+  } catch (e) { showMsg($('addMsg'), '写入失败: ' + e.message, false); toast('写入失败', 'err'); }
+}
+
+async function batchUpsert() {
+  const lines = $('batchText').value.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) { showMsg($('batchMsg'), '请输入至少一行文本', false); return; }
+  const items = lines.map(text => ({ tag: uuid(), text }));
+  try {
+    const r = await api(`/scoops/${currentScoop}/tags/batch`, { method: 'POST', body: JSON.stringify({ items }) });
+    const ok = r.results.filter(x => !x.error).length, fail = r.results.length - ok;
+    showMsg($('batchMsg'), `成功 ${ok} 条${fail ? ` · 失败 ${fail}` : ''}`, !fail);
+    toast(`批量写入 ${ok}/${r.results.length}`, fail ? 'err' : 'ok');
+    $('batchText').value = ''; loadInfo();
+  } catch (e) { showMsg($('batchMsg'), '批量写入失败: ' + e.message, false); toast('批量写入失败', 'err'); }
 }
 
 async function deleteOne(tag) {
@@ -242,33 +584,60 @@ async function deleteOne(tag) {
   try {
     await api(`/scoops/${currentScoop}/tags/${tag}`, { method: 'DELETE' });
     selected.delete(tag); updateSelectUI();
-    loadInfo(); loadTags();
-  } catch (e) { alert('删除失败: ' + e.message); }
+    toast('已删除', 'ok'); loadInfo(); loadTags();
+  } catch (e) { toast('删除失败: ' + e.message, 'err'); }
 }
 
 async function batchDelete() {
-  if (selected.size === 0) return;
+  if (!selected.size) return;
   if (!confirm(`确认批量删除 ${selected.size} 条向量？`)) return;
   const tags = [...selected];
   try {
-    const r = await api(`/scoops/${currentScoop}/tags/batch-delete`, {
-      method: 'POST',
-      body: JSON.stringify({ tags }),
-    });
-    const failed = r.results.filter(x => !x.deleted);
-    alert(failed.length === 0
-      ? `已删除 ${tags.length} 条`
-      : `删除完成：成功 ${tags.length - failed.length} 条，失败 ${failed.length} 条（${failed[0].error}）`);
-    selected.clear(); updateSelectUI();
-    loadInfo(); loadTags();
-  } catch (e) { alert('批量删除失败: ' + e.message); }
+    const r = await api(`/scoops/${currentScoop}/tags/batch-delete`, { method: 'POST', body: JSON.stringify({ tags }) });
+    const failed = r.results.filter(x => !x.deleted), okN = tags.length - failed.length;
+    toast(`删除 ${okN} 成功${failed.length ? ` · ${failed.length} 失败` : ''}`, failed.length ? 'err' : 'ok');
+    selected.clear(); updateSelectUI(); loadInfo(); loadTags();
+  } catch (e) { toast('批量删除失败: ' + e.message, 'err'); }
 }
 
-// ---------- 启动 ----------
-initTabs();
+/* ---------- 检索 ---------- */
+async function doSearch() {
+  const q = $('searchQ').value.trim();
+  if (!q) { toast('请输入查询文本', 'err'); return; }
+  const k = Math.max(1, Math.min(100, parseInt($('searchK').value) || 10));
+  const results = $('searchResults');
+  $('searchStat').textContent = '';
+  results.innerHTML = '<div class="empty">检索中…</div>';
+  $('searchBtn').disabled = true;
+  try {
+    const params = new URLSearchParams({ q, k: String(k) });
+    const t0 = performance.now();
+    const r = await api(`/scoops/${currentScoop}/tags/search?${params}`);
+    const dt = (performance.now() - t0).toFixed(0);
+    const hits = r.results || [];
+    if (!hits.length) {
+      results.innerHTML = '<div class="empty">无匹配结果</div>';
+      $('searchStat').innerHTML = `耗时 <b>${dt}ms</b> · <b>0</b> 命中`;
+      return;
+    }
+    $('searchStat').innerHTML = `耗时 <b>${dt}ms</b> · <b>${hits.length}</b> 命中 · top-<b>${k}</b>`;
+    results.innerHTML = hits.map((h, i) => {
+      const pct = Math.max(0, Math.min(1, h.score)) * 100;
+      return `<div class="hit"><div><div class="rank">#${String(i+1).padStart(2,'0')}</div><div class="tag">${h.tag}</div></div>
+        <div class="score"><div class="bar"><span data-w="${pct}"></span></div><div class="val">${(h.score*100).toFixed(1)}</div></div></div>`;
+    }).join('');
+    requestAnimationFrame(() => results.querySelectorAll('.bar > span').forEach(s => s.style.width = s.dataset.w + '%'));
+  } catch (e) {
+    results.innerHTML = `<div class="empty err">检索失败: ${esc(e.message)}</div>`;
+    toast('检索失败', 'err');
+  } finally { $('searchBtn').disabled = false; }
+}
+
+$('searchQ').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doSearch(); });
+
+/* ---------- 启动 ---------- */
 loadInfo();
-loadTags();
-setInterval(loadInfo, 5000); // 状态卡 5s 自动刷新
+setInterval(loadInfo, 5000);
 </script>
 </body>
 </html>
