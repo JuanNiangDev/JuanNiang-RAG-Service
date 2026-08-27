@@ -58,8 +58,9 @@ RUN mkdir -p src \
     && cargo build --release --lib \
     && rm -rf src
 
-# banner.txt 由 src/main.rs 的 include_str!("../banner.txt") 编译期内嵌，必须拷入
+# banner.txt 与 web/ 均由 src 的 include_str! 编译期内嵌，必须全部拷入
 COPY banner.txt ./
+COPY web ./web
 
 # 拷贝真实源码。关键：必须 touch 源文件——Docker COPY 保留宿主机旧 mtime，
 # cargo 的 mtime 指纹会误判"源码未变化"而复用占位产物（空壳进镜像，启动即 exit 0）
