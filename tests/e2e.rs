@@ -6,7 +6,7 @@
 use juan_niang_rag_service::config::Config;
 use juan_niang_rag_service::embedding::Embedder;
 use juan_niang_rag_service::search::aggregate;
-use juan_niang_rag_service::store::TagStore;
+use juan_niang_rag_service::store::{Scoop, StoreSet};
 use juan_niang_rag_service::writer::Writer;
 use uuid::Uuid;
 
@@ -36,15 +36,16 @@ async fn full_cycle() {
     std::fs::create_dir_all(&config.data_dir).unwrap();
 
     let embedder = Embedder::new(&config.model_path, config.n_threads, config.n_ctx);
-    let store = TagStore::load(&config).unwrap();
-    let writer = Writer::start(store, embedder.clone(), config.clone());
+    let stores = StoreSet::load(&config).unwrap();
+    let writer = Writer::start(stores, embedder.clone(), config.clone());
 
-    // 1. 长文 upsert（应触发服务端分块）
+    // 1. 长文 upsert（应触发服务端分块）；固定使用 knowledge 分库
+    let scoop = Scoop::Knowledge;
     let tag = Uuid::new_v4();
     let long_text: String = (0..30)
         .map(|i| format!("这是第{i}段测试内容，用于验证服务端透明分块与相似检索。"))
         .collect();
-    let stats = writer.upsert(tag, long_text).await.unwrap();
+    let stats = writer.upsert(scoop, tag, long_text).await.unwrap();
     assert!(
         stats.chunk_count >= 2,
         "长文应被分块，实际 {}",
@@ -54,26 +55,26 @@ async fn full_cycle() {
     // 2. 检索应命中该 tag
     let q = "服务端透明分块与相似检索".to_string();
     let (qv, _) = embedder.embed(vec![q], true).await.unwrap();
-    let snap = writer.snapshot();
+    let snap = writer.snapshot(scoop);
     let hits = snap.index.search(&qv[0], 30);
     assert!(!hits.is_empty(), "索引里应有块");
     let results = aggregate(&hits, &snap.chunk_owner, 10, None);
     assert!(results.iter().any(|h| h.tag == tag), "检索应命中 tag {tag}");
 
     // 3. 覆写为短文本：块数应为 1，旧块全部替换
-    let stats = writer.upsert(tag, "短文本。".into()).await.unwrap();
+    let stats = writer.upsert(scoop, tag, "短文本。".into()).await.unwrap();
     assert_eq!(stats.chunk_count, 1);
-    assert_eq!(writer.health().1, 1, "覆写后只剩 1 块");
+    assert_eq!(writer.health()[0].2, 1, "覆写后只剩 1 块");
 
     // 4. 删除
-    writer.delete(tag).await.unwrap();
-    assert_eq!(writer.health().0, 0, "删除后 tag 应为 0");
+    writer.delete(scoop, tag).await.unwrap();
+    assert_eq!(writer.health()[0].1, 0, "删除后 tag 应为 0");
 
     // 5. 重启模拟：从磁盘恢复，状态一致
     drop(writer);
-    let store2 = TagStore::load(&config).unwrap();
-    assert_eq!(store2.tag_count(), 0);
-    assert_eq!(store2.chunk_count(), 0);
+    let stores2 = StoreSet::load(&config).unwrap();
+    assert_eq!(stores2.scoop_stats()[0].1, 0);
+    assert_eq!(stores2.scoop_stats()[0].2, 0);
 
     let _ = std::fs::remove_dir_all(&config.data_dir);
 }

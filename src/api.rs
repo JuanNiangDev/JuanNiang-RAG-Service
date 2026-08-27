@@ -1,22 +1,26 @@
 //! HTTP API（阶段 6）。
 //!
-//! - PUT    /tags/{tag}       upsert（已存在则覆写）
-//! - POST   /tags/batch       批量 upsert（一次嵌入 + 一次发布）
-//! - GET    /tags/search?q=&k=&min_score=   检索，返回 tag 列表
-//! - DELETE /tags/{tag}       删除
-//! - GET    /health           健康检查 + 规模
+//! - PUT    /scoops/{scoop}/tags/{tag}       upsert（已存在则覆写）
+//! - POST   /scoops/{scoop}/tags/batch       批量 upsert（一次嵌入 + 一次发布）
+//! - GET    /scoops/{scoop}/tags/search?q=&k=&min_score=   检索（限制在 scoop 内）
+//! - DELETE /scoops/{scoop}/tags/{tag}       删除
+//! - GET    /health / /info                   健康检查 + per-scoop 规模
+//!
+//! scoop 是白名单枚举（knowledge / memory / groupmgr），非法值 → 400。
 
 use crate::embedding::Embedder;
 use crate::error::ServiceError;
 use crate::search::{SearchHit, aggregate};
+use crate::store::{Scoop, StoreError};
 use crate::writer::Writer;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use tracing::error;
@@ -27,7 +31,7 @@ use uuid::Uuid;
 pub struct AppState {
     pub writer: Arc<Writer>,
     pub embedder: Embedder,
-    /// 查询文本 → 归一化向量（命中免推理，§8.3）
+    /// 查询文本 → 归一化向量（命中免推理，§8.3）；scoop 无关（同文同向量）
     pub query_cache: Mutex<LruCache<String, Vec<f32>>>,
 }
 
@@ -45,15 +49,57 @@ impl AppState {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(console))
         .route("/health", get(health))
         .route("/info", get(info))
-        .route("/tags/{tag}", put(upsert).delete(delete_tag))
-        .route("/tags/batch", post(batch_upsert))
-        .route("/tags/search", get(search))
+        .route("/metrics", get(crate::metrics::metrics))
+        .route("/scoops/{scoop}/tags", get(list_tags))
+        .route("/scoops/{scoop}/tags/{tag}", put(upsert).delete(delete_tag))
+        .route("/scoops/{scoop}/tags/batch", post(batch_upsert))
+        .route("/scoops/{scoop}/tags/batch-delete", post(batch_delete))
+        .route("/scoops/{scoop}/tags/search", get(search))
         .with_state(state)
+        // HTTP 请求指标（请求数/耗时，path 用路由模板保持低基数）
+        .layer(axum::middleware::from_fn(crate::metrics::http_metrics))
 }
 
 // ---------- 请求/响应类型 ----------
+
+/// Web 控制台 HTML（内嵌，无鉴权；仅限内网/本机使用）
+const CONSOLE_HTML: &str = include_str!("../web/index.html");
+
+/// 分页列表响应
+#[derive(Serialize)]
+pub struct TagListResponse {
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+    pub items: Vec<TagListItem>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TagListItem {
+    pub tag: Uuid,
+    pub chunk_count: usize,
+}
+
+/// 批量删除请求/响应
+#[derive(Deserialize)]
+pub struct BatchDeleteRequest {
+    pub tags: Vec<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct BatchDeleteItemResponse {
+    pub tag: Uuid,
+    pub deleted: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BatchDeleteResponse {
+    pub results: Vec<BatchDeleteItemResponse>,
+}
 
 #[derive(Deserialize)]
 pub struct UpsertRequest {
@@ -62,6 +108,7 @@ pub struct UpsertRequest {
 
 #[derive(Serialize)]
 pub struct UpsertResponse {
+    pub scoop: String,
     pub tag: Uuid,
     pub chunk_count: usize,
     pub truncated: bool,
@@ -109,11 +156,17 @@ pub struct SearchResponse {
     pub results: Vec<SearchHit>,
 }
 
+#[derive(Serialize, Default)]
+pub struct ScoopStats {
+    pub tags: usize,
+    pub chunks: usize,
+}
+
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
-    pub tags: usize,
-    pub chunks: usize,
+    /// 各 scoop 的 tag / 块数量
+    pub scoops: HashMap<String, ScoopStats>,
 }
 
 #[derive(Serialize)]
@@ -131,32 +184,43 @@ pub struct InfoResponse {
     pub model: crate::embedding::EmbedderInfo,
     /// 进程内存（仅 Linux，读 /proc/self/status）
     pub memory: Option<MemoryInfo>,
-    pub tags: usize,
-    pub chunks: usize,
+    /// 各 scoop 的 tag / 块数量
+    pub scoops: HashMap<String, ScoopStats>,
+}
+
+fn scoop_stats_map(stats: Vec<(Scoop, usize, usize)>) -> HashMap<String, ScoopStats> {
+    stats
+        .into_iter()
+        .map(|(scoop, tags, chunks)| (scoop.as_str().to_string(), ScoopStats { tags, chunks }))
+        .collect()
 }
 
 // ---------- 处理器 ----------
 
+/// GET /：简易无鉴权 Web 控制台（基础信息 + 分页查看/增删向量）。
+async fn console() -> impl axum::response::IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        CONSOLE_HTML,
+    )
+}
+
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let (tags, chunks) = state.writer.health();
     Json(HealthResponse {
         status: "ok",
-        tags,
-        chunks,
+        scoops: scoop_stats_map(state.writer.health()),
     })
 }
 
-/// GET /info：模型状态 + 进程内存 + 向量规模
+/// GET /info：模型状态 + 进程内存 + per-scoop 规模
 async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     let model = state.embedder.info().await;
-    let (tags, chunks) = state.writer.health();
     let memory = process_memory_kb().map(|(rss_kb, vsize_kb)| MemoryInfo { rss_kb, vsize_kb });
     Json(InfoResponse {
         status: "ok",
         model,
         memory,
-        tags,
-        chunks,
+        scoops: scoop_stats_map(state.writer.health()),
     })
 }
 
@@ -185,14 +249,15 @@ fn parse_kb(s: &str) -> Option<u64> {
 
 async fn upsert(
     State(state): State<Arc<AppState>>,
-    Path(tag): Path<Uuid>,
+    Path((scoop, tag)): Path<(Scoop, Uuid)>,
     Json(body): Json<UpsertRequest>,
 ) -> Result<Json<UpsertResponse>, AppError> {
     if body.text.trim().is_empty() {
         return Err(AppError::bad_request("text 不能为空"));
     }
-    let stats = state.writer.upsert(tag, body.text).await?;
+    let stats = state.writer.upsert(scoop, tag, body.text).await?;
     Ok(Json(UpsertResponse {
+        scoop: scoop.as_str().to_string(),
         tag,
         chunk_count: stats.chunk_count,
         truncated: stats.truncated,
@@ -201,6 +266,7 @@ async fn upsert(
 
 async fn batch_upsert(
     State(state): State<Arc<AppState>>,
+    Path(scoop): Path<Scoop>,
     Json(body): Json<BatchUpsertRequest>,
 ) -> Result<Json<BatchResponse>, AppError> {
     if body.items.is_empty() {
@@ -208,7 +274,7 @@ async fn batch_upsert(
     }
     let tags: Vec<Uuid> = body.items.iter().map(|i| i.tag).collect();
     let items: Vec<(Uuid, String)> = body.items.into_iter().map(|i| (i.tag, i.text)).collect();
-    let results = state.writer.batch_upsert(items).await?;
+    let results = state.writer.batch_upsert(scoop, items).await?;
     let results = tags
         .into_iter()
         .zip(results)
@@ -230,15 +296,21 @@ async fn batch_upsert(
     Ok(Json(BatchResponse { results }))
 }
 
-/// 检索：q 必填，k 默认 10，min_score 可选
+/// 检索：q 必填，k 默认 10，min_score 可选；只在目标 scoop 内检索
 async fn search(
     State(state): State<Arc<AppState>>,
+    Path(scoop): Path<Scoop>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse>, AppError> {
     if params.q.trim().is_empty() {
         return Err(AppError::bad_request("q 不能为空"));
     }
     let k = params.k.clamp(1, 100);
+    // 检索指标（scoop 低基数标签）
+    crate::metrics::search_total()
+        .with_label_values(&[scoop.as_str()])
+        .inc();
+    let start = std::time::Instant::now();
 
     // 1. 查询向量（LRU 缓存命中免推理）
     // 注意：MutexGuard 不能跨 await，命中分支的守卫随语句结束释放，
@@ -253,7 +325,15 @@ async fn search(
         if let Some(v) = cached {
             v
         } else {
-            let (vectors, _) = state.embedder.embed(vec![params.q.clone()], true).await?;
+            let vectors = match state.embedder.embed(vec![params.q.clone()], true).await {
+                Ok((v, _)) => v,
+                Err(e) => {
+                    crate::metrics::search_errors()
+                        .with_label_values(&[scoop.as_str()])
+                        .inc();
+                    return Err(AppError(ServiceError::Embed(e)));
+                }
+            };
             let v = vectors
                 .into_iter()
                 .next()
@@ -267,20 +347,114 @@ async fn search(
         }
     };
 
-    // 2. 块级检索 → 按 tag 聚合
-    let snap = state.writer.snapshot();
+    // 2. scoop 内块级检索 → 按 tag 聚合
+    let snap = state.writer.snapshot(scoop);
     let k_chunks = (k * 3).max(30); // 多召回一些块再聚合，避免同一 tag 霸榜
     let hits = snap.index.search(&query_vec, k_chunks);
     let results = aggregate(&hits, &snap.chunk_owner, k, params.min_score);
+    crate::metrics::search_duration()
+        .with_label_values(&[scoop.as_str()])
+        .observe(start.elapsed().as_secs_f64());
+    crate::metrics::search_hits()
+        .with_label_values(&[scoop.as_str()])
+        .observe(results.len() as f64);
     Ok(Json(SearchResponse { results }))
 }
 
 async fn delete_tag(
     State(state): State<Arc<AppState>>,
-    Path(tag): Path<Uuid>,
+    Path((scoop, tag)): Path<(Scoop, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    state.writer.delete(tag).await?;
+    state.writer.delete(scoop, tag).await?;
     Ok(Json(serde_json::json!({ "deleted": tag })))
+}
+
+/// GET /scoops/{scoop}/tags?page=&page_size=：分页列出该分库全部 tag（UUID 排序）。
+/// 读快照实现，不经过写者（无锁）。page_size 上限 100。
+#[derive(Deserialize)]
+struct ListParams {
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default = "default_page_size")]
+    page_size: usize,
+}
+
+fn default_page() -> usize {
+    1
+}
+
+fn default_page_size() -> usize {
+    20
+}
+
+async fn list_tags(
+    State(state): State<Arc<AppState>>,
+    Path(scoop): Path<Scoop>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<TagListResponse>, AppError> {
+    let page = params.page.max(1);
+    let page_size = params.page_size.clamp(1, 100);
+
+    let snap = state.writer.snapshot(scoop);
+    let mut tags: Vec<TagListItem> = snap
+        .tag_to_ids
+        .iter()
+        .map(|(tag, ids)| TagListItem {
+            tag: *tag,
+            chunk_count: ids.len(),
+        })
+        .collect();
+    // UUID 字典序分页（稳定、可复现）
+    tags.sort_by_key(|a| a.tag);
+    let total = tags.len();
+    let start = (page - 1) * page_size;
+    let items = if start >= total {
+        Vec::new()
+    } else {
+        let end = (start + page_size).min(total);
+        tags[start..end].to_vec()
+    };
+    Ok(Json(TagListResponse {
+        total,
+        page,
+        page_size,
+        items,
+    }))
+}
+
+/// POST /scoops/{scoop}/tags/batch-delete：批量删除（逐条尝试，单条失败不影响其他）。
+async fn batch_delete(
+    State(state): State<Arc<AppState>>,
+    Path(scoop): Path<Scoop>,
+    Json(body): Json<BatchDeleteRequest>,
+) -> Result<Json<BatchDeleteResponse>, AppError> {
+    if body.tags.is_empty() {
+        return Err(AppError::bad_request("tags 不能为空"));
+    }
+    if body.tags.len() > 500 {
+        return Err(AppError::bad_request("单次批量删除上限 500 条"));
+    }
+    let tags = body.tags;
+    // writer 返回顺序与请求一致
+    let results = state.writer.batch_delete(scoop, tags.clone()).await?;
+    let mut resp = BatchDeleteResponse {
+        results: Vec::with_capacity(results.len()),
+    };
+    for (tag, r) in tags.into_iter().zip(results) {
+        match r {
+            Ok(()) => resp.results.push(BatchDeleteItemResponse {
+                tag,
+                deleted: true,
+                error: None,
+            }),
+            Err(e) => resp.results.push(BatchDeleteItemResponse {
+                tag,
+                deleted: false,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+    Ok(Json(resp))
 }
 
 // ---------- 统一错误 → HTTP 响应 ----------
@@ -309,8 +483,14 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self.0 {
             ServiceError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
-            ServiceError::Store(crate::store::StoreError::TagNotFound(_)) => {
+            ServiceError::Store(StoreError::TagNotFound(_)) => {
                 (StatusCode::NOT_FOUND, self.0.to_string())
+            }
+            ServiceError::Store(StoreError::UnknownScoop(..)) => {
+                (StatusCode::BAD_REQUEST, self.0.to_string())
+            }
+            ServiceError::Store(StoreError::TagInOtherScoop(..)) => {
+                (StatusCode::CONFLICT, self.0.to_string())
             }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()),
         };

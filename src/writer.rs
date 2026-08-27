@@ -1,8 +1,9 @@
 //! 写者任务（阶段 5）：查询与写入互不阻塞的核心。
 //!
-//! - 写者线程独占 `TagStore`，通过 mpsc 收命令
-//! - 每批命令：分块 → 批量嵌入 → 应用 → 持久化 → COW 发布 → 应答
-//! - 读者永远只读 `Arc<IndexSnapshot>`（瞬时读锁取引用，检索无锁）
+//! - 写者线程独占 `StoreSet`（多 scoop，每个 scoop 独立 TagStore），通过 mpsc 收命令
+//! - 每批命令：分块 → 批量嵌入 → 按 scoop 应用 → 本 scoop 持久化 → 本 scoop COW 发布
+//!   （一次写入只影响归属 scoop，其余 scoop 的快照与磁盘文件零参与）
+//! - 读者永远只读对应 scoop 的 `Arc<IndexSnapshot>`（瞬时读锁取引用，检索无锁）
 //! - 批量命令只发布/持久化一次（摊销 COW 成本）
 //!
 //! 持久化先于发布：读者永远看不到未落盘的数据，崩溃最多丢最后一次应答前
@@ -12,13 +13,13 @@ use crate::chunker::{ChunkConfig, split};
 use crate::config::Config;
 use crate::embedding::Embedder;
 use crate::error::ServiceError;
-use crate::store::IndexSnapshot;
-use crate::store::TagStore;
+use crate::store::{IndexSnapshot, Scoop, StoreSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -34,73 +35,99 @@ pub struct WriteStats {
     pub truncated: bool,
 }
 
-/// 写命令：通过 mpsc 发给写者线程
+/// 写命令：通过 mpsc 发给写者线程（带 scoop 路由）
 enum WriteCmd {
     Upsert {
+        scoop: Scoop,
         tag: Uuid,
         text: String,
         reply: oneshot::Sender<Result<WriteStats, ServiceError>>,
     },
     BatchUpsert {
+        scoop: Scoop,
         items: Vec<(Uuid, String)>,
         reply: oneshot::Sender<Vec<Result<WriteStats, ServiceError>>>,
     },
     Delete {
+        scoop: Scoop,
         tag: Uuid,
         reply: oneshot::Sender<Result<(), ServiceError>>,
     },
+    BatchDelete {
+        scoop: Scoop,
+        tags: Vec<Uuid>,
+        reply: oneshot::Sender<Vec<Result<(), ServiceError>>>,
+    },
 }
 
-/// 写者句柄：Clone 可分享，内部是 `Sender<WriteCmd>` + 最新快照
+/// 写者句柄：Clone 可分享，内部是 `Sender<WriteCmd>` + 各 scoop 最新快照
 #[derive(Clone)]
 pub struct Writer {
     tx: mpsc::Sender<WriteCmd>,
-    snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
+    snapshots: HashMap<Scoop, Arc<RwLock<Arc<IndexSnapshot>>>>,
 }
 
 impl Writer {
     /// 启动写者任务
-    pub fn start(store: TagStore, embedder: Embedder, config: Config) -> Self {
-        let initial = store.snapshot().expect("初始快照失败");
-        let snapshot = Arc::new(RwLock::new(Arc::new(initial)));
+    pub fn start(stores: StoreSet, embedder: Embedder, config: Config) -> Self {
+        let mut snapshots = HashMap::new();
+        for scoop in Scoop::ALL {
+            let initial = stores.snapshot(scoop).expect("初始快照失败");
+            snapshots.insert(scoop, Arc::new(RwLock::new(Arc::new(initial))));
+        }
         let (tx, rx) = mpsc::channel(256);
 
         let task = WriterTask {
-            store,
+            stores,
             embedder,
             config,
             rx,
-            snapshot: snapshot.clone(),
+            snapshots: snapshots.clone(),
         };
         tokio::spawn(async move { task.run().await });
 
-        Self { tx, snapshot }
+        Self { tx, snapshots }
     }
 
-    /// 读者取最新快照：瞬时读锁拿 Arc，之后检索无锁
-    pub fn snapshot(&self) -> Arc<IndexSnapshot> {
-        self.snapshot.read().expect("快照锁中毒").clone()
+    /// 读者取指定 scoop 的最新快照：瞬时读锁拿 Arc，之后检索无锁
+    pub fn snapshot(&self, scoop: Scoop) -> Arc<IndexSnapshot> {
+        self.snapshots[&scoop].read().expect("快照锁中毒").clone()
     }
 
     /// 单条 upsert（读己之写：应答时数据已发布并落盘）
-    pub async fn upsert(&self, tag: Uuid, text: String) -> Result<WriteStats, ServiceError> {
+    pub async fn upsert(
+        &self,
+        scoop: Scoop,
+        tag: Uuid,
+        text: String,
+    ) -> Result<WriteStats, ServiceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(WriteCmd::Upsert { tag, text, reply })
+            .send(WriteCmd::Upsert {
+                scoop,
+                tag,
+                text,
+                reply,
+            })
             .await
             .map_err(|_| ServiceError::Writer(WriterError::Closed))?;
         rx.await
             .map_err(|_| ServiceError::Writer(WriterError::Closed))?
     }
 
-    /// 批量 upsert：一次嵌入 + 一次发布 + 一次持久化
+    /// 批量 upsert：一次嵌入 + 一次发布 + 一次持久化（同一 scoop 内）
     pub async fn batch_upsert(
         &self,
+        scoop: Scoop,
         items: Vec<(Uuid, String)>,
     ) -> Result<Vec<Result<WriteStats, ServiceError>>, ServiceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(WriteCmd::BatchUpsert { items, reply })
+            .send(WriteCmd::BatchUpsert {
+                scoop,
+                items,
+                reply,
+            })
             .await
             .map_err(|_| ServiceError::Writer(WriterError::Closed))?;
         let results = rx
@@ -109,29 +136,52 @@ impl Writer {
         Ok(results)
     }
 
-    pub async fn delete(&self, tag: Uuid) -> Result<(), ServiceError> {
+    pub async fn delete(&self, scoop: Scoop, tag: Uuid) -> Result<(), ServiceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(WriteCmd::Delete { tag, reply })
+            .send(WriteCmd::Delete { scoop, tag, reply })
             .await
             .map_err(|_| ServiceError::Writer(WriterError::Closed))?;
         rx.await
             .map_err(|_| ServiceError::Writer(WriterError::Closed))?
     }
 
-    pub fn health(&self) -> (usize, usize) {
-        let snap = self.snapshot();
-        (snap.tag_count(), snap.chunk_count())
+    /// 批量删除：逐条尝试（不属于本 scoop 的 tag 单条失败，不影响其他），
+    /// 有成功条目时一次持久化+发布。返回逐条结果。
+    pub async fn batch_delete(
+        &self,
+        scoop: Scoop,
+        tags: Vec<Uuid>,
+    ) -> Result<Vec<Result<(), ServiceError>>, ServiceError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(WriteCmd::BatchDelete { scoop, tags, reply })
+            .await
+            .map_err(|_| ServiceError::Writer(WriterError::Closed))?;
+        // rx 内容本身即 Result<Vec<...>, ServiceError>，RecvError 需转换
+        rx.await
+            .map_err(|_| ServiceError::Writer(WriterError::Closed))
+    }
+
+    /// 各 scoop 规模：(scoop, tag 数, 块数)
+    pub fn health(&self) -> Vec<(Scoop, usize, usize)> {
+        Scoop::ALL
+            .iter()
+            .map(|&s| {
+                let snap = self.snapshot(s);
+                (s, snap.tag_count(), snap.chunk_count())
+            })
+            .collect()
     }
 }
 
-/// 写者任务本体（独占 TagStore）
+/// 写者任务本体（独占 StoreSet）
 struct WriterTask {
-    store: TagStore,
+    stores: StoreSet,
     embedder: Embedder,
     config: Config,
     rx: mpsc::Receiver<WriteCmd>,
-    snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
+    snapshots: HashMap<Scoop, Arc<RwLock<Arc<IndexSnapshot>>>>,
 }
 
 impl WriterTask {
@@ -151,45 +201,90 @@ impl WriterTask {
 
     async fn handle(&mut self, cmd: WriteCmd) {
         match cmd {
-            WriteCmd::Upsert { tag, text, reply } => {
-                let result = self.apply_upsert(tag, text).await;
+            WriteCmd::Upsert {
+                scoop,
+                tag,
+                text,
+                reply,
+            } => {
+                let result = self.apply_upsert(scoop, tag, text).await;
                 let _ = reply.send(result);
             }
-            WriteCmd::BatchUpsert { items, reply } => {
+            WriteCmd::BatchUpsert {
+                scoop,
+                items,
+                reply,
+            } => {
                 // 整批只发布/持久化一次
-                let results = self.apply_batch_upsert(items).await;
+                let results = self.apply_batch_upsert(scoop, items).await;
                 let _ = reply.send(results);
             }
-            WriteCmd::Delete { tag, reply } => {
-                let result = self.apply_delete(tag);
+            WriteCmd::Delete { scoop, tag, reply } => {
+                let result = self.apply_delete(scoop, tag);
                 let _ = reply.send(result);
+            }
+            WriteCmd::BatchDelete { scoop, tags, reply } => {
+                let results = self.apply_batch_delete(scoop, tags);
+                let _ = reply.send(results);
             }
         }
     }
 
-    /// 单条 upsert：应用 → 持久化 → 发布
-    async fn apply_upsert(&mut self, tag: Uuid, text: String) -> Result<WriteStats, ServiceError> {
-        let (chunks, vectors, truncated) = self.prepare_chunks(std::slice::from_ref(&text)).await?;
-        let chunks = chunks.into_iter().next().unwrap_or_default();
-        let vectors = vectors.into_iter().next().unwrap_or_default();
-        let truncated = truncated.into_iter().next().unwrap_or(false);
-        if vectors.is_empty() {
-            return Err(ServiceError::BadRequest("文本为空或分块后无内容".into()));
+    /// 单条 upsert：应用 → 本 scoop 持久化 → 本 scoop 发布
+    async fn apply_upsert(
+        &mut self,
+        scoop: Scoop,
+        tag: Uuid,
+        text: String,
+    ) -> Result<WriteStats, ServiceError> {
+        let start = std::time::Instant::now();
+        let result: Result<WriteStats, ServiceError> = async {
+            let (chunks, vectors, truncated) =
+                self.prepare_chunks(std::slice::from_ref(&text)).await?;
+            let chunks = chunks.into_iter().next().unwrap_or_default();
+            let vectors = vectors.into_iter().next().unwrap_or_default();
+            let truncated = truncated.into_iter().next().unwrap_or(false);
+            if vectors.is_empty() {
+                return Err(ServiceError::BadRequest("文本为空或分块后无内容".into()));
+            }
+            let n = self.stores.upsert(scoop, tag, &chunks, &vectors)?;
+            self.commit(scoop)?;
+            debug!(scoop = %scoop, tag = %tag, chunks = n, "upsert 完成");
+            Ok(WriteStats {
+                chunk_count: n,
+                truncated,
+            })
         }
-        let n = self.store.upsert(tag, &chunks, &vectors)?;
-        self.commit()?;
-        debug!(tag = %tag, chunks = n, "upsert 完成");
-        Ok(WriteStats {
-            chunk_count: n,
-            truncated,
-        })
+        .await;
+        // 指标
+        crate::metrics::write_total()
+            .with_label_values(&["upsert", scoop.as_str()])
+            .inc();
+        crate::metrics::write_duration()
+            .with_label_values(&["upsert", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        match &result {
+            Ok(ws) => {
+                crate::metrics::write_chunks()
+                    .with_label_values(&[scoop.as_str()])
+                    .inc_by(ws.chunk_count as u64);
+            }
+            Err(_) => {
+                crate::metrics::write_errors()
+                    .with_label_values(&["upsert", scoop.as_str()])
+                    .inc();
+            }
+        }
+        result
     }
 
     /// 批量 upsert：所有条目合并成一次嵌入，整批一次持久化+发布
     async fn apply_batch_upsert(
         &mut self,
+        scoop: Scoop,
         items: Vec<(Uuid, String)>,
     ) -> Vec<Result<WriteStats, ServiceError>> {
+        let start = std::time::Instant::now();
         let mut results = Vec::with_capacity(items.len());
         if items.is_empty() {
             return results;
@@ -214,7 +309,7 @@ impl WriterTask {
                         any_error = true;
                         continue;
                     }
-                    match self.store.upsert(*tag, &chunks, &vectors) {
+                    match self.stores.upsert(scoop, *tag, &chunks, &vectors) {
                         Ok(n) => results.push(Ok(WriteStats {
                             chunk_count: n,
                             truncated,
@@ -234,21 +329,110 @@ impl WriterTask {
             }
         }
 
-        // 3. 即使有条目失败，已成功的部分也要持久化+发布
+        // 3. 即使有条目失败，已成功的部分也要持久化+发布；
+        //    持久化/发布失败必须让调用方感知：成功条目标记为失败（未落盘）
         if (!any_error || results.iter().any(|r| r.is_ok()))
-            && let Err(e) = self.commit()
+            && let Err(e) = self.commit(scoop)
         {
-            warn!("批量持久化失败: {e}");
+            let msg = format!("批量写入持久化失败: {e}");
+            for r in results.iter_mut() {
+                if r.is_ok() {
+                    *r = Err(ServiceError::Internal(msg.clone()));
+                }
+            }
         }
-        info!(n = items.len(), "批量 upsert 完成");
+        info!(scoop = %scoop, n = items.len(), "批量 upsert 完成");
+        // 指标（op=batch：一次批量 = 一次写操作，逐条结果计入块数/错误）
+        crate::metrics::write_total()
+            .with_label_values(&["batch", scoop.as_str()])
+            .inc();
+        crate::metrics::write_duration()
+            .with_label_values(&["batch", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        for r in &results {
+            match r {
+                Ok(ws) => {
+                    crate::metrics::write_chunks()
+                        .with_label_values(&[scoop.as_str()])
+                        .inc_by(ws.chunk_count as u64);
+                }
+                Err(_) => {
+                    crate::metrics::write_errors()
+                        .with_label_values(&["batch", scoop.as_str()])
+                        .inc();
+                }
+            }
+        }
         results
     }
 
-    fn apply_delete(&mut self, tag: Uuid) -> Result<(), ServiceError> {
-        self.store.delete(tag)?;
-        self.commit()?;
-        info!(tag = %tag, "删除完成");
-        Ok(())
+    fn apply_delete(&mut self, scoop: Scoop, tag: Uuid) -> Result<(), ServiceError> {
+        let start = std::time::Instant::now();
+        let result = (|| -> Result<(), ServiceError> {
+            self.stores.delete(scoop, tag)?;
+            self.commit(scoop)?;
+            info!(scoop = %scoop, tag = %tag, "删除完成");
+            Ok(())
+        })();
+        // 指标
+        crate::metrics::write_total()
+            .with_label_values(&["delete", scoop.as_str()])
+            .inc();
+        crate::metrics::write_duration()
+            .with_label_values(&["delete", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        if result.is_err() {
+            crate::metrics::write_errors()
+                .with_label_values(&["delete", scoop.as_str()])
+                .inc();
+        }
+        result
+    }
+
+    /// 批量删除：逐条尝试，有成功条目时一次持久化+发布。
+    fn apply_batch_delete(
+        &mut self,
+        scoop: Scoop,
+        tags: Vec<Uuid>,
+    ) -> Vec<Result<(), ServiceError>> {
+        let start = std::time::Instant::now();
+        let mut results = Vec::with_capacity(tags.len());
+        let mut any_ok = false;
+        for tag in tags {
+            match self.stores.delete(scoop, tag) {
+                Ok(()) => {
+                    any_ok = true;
+                    results.push(Ok(()));
+                }
+                Err(e) => results.push(Err(ServiceError::Store(e))),
+            }
+        }
+        // 有成功条目才持久化+发布（全失败时无变更，跳过 commit）；
+        // 持久化失败时把成功条目标记为失败，避免调用方误以为已落盘
+        if any_ok && let Err(e) = self.commit(scoop) {
+            let msg = format!("批量删除持久化失败: {e}");
+            for r in results.iter_mut() {
+                if r.is_ok() {
+                    *r = Err(ServiceError::Internal(msg.clone()));
+                }
+            }
+        }
+        info!(scoop = %scoop, n = results.len(), "批量删除完成");
+        // 指标：逐条按 op=delete 计数（面板维度不变），耗时记整批一次
+        crate::metrics::write_duration()
+            .with_label_values(&["delete", scoop.as_str()])
+            .observe(start.elapsed().as_secs_f64());
+        for r in &results {
+            crate::metrics::write_total()
+                .with_label_values(&["delete", scoop.as_str()])
+                .inc();
+            if r.is_err() {
+                crate::metrics::write_errors()
+                    .with_label_values(&["delete", scoop.as_str()])
+                    .inc();
+            }
+        }
+        results
     }
 
     /// 分块 + 批量嵌入。返回 (每文本的块列表, 每文本的向量列表, 每文本是否有截断)
@@ -279,12 +463,12 @@ impl WriterTask {
         Ok((all_chunks, all_vectors, all_truncated))
     }
 
-    /// 持久化 → COW 发布 → 替换读者快照
-    fn commit(&mut self) -> Result<(), ServiceError> {
-        self.store.persist()?;
-        let snap = self.store.snapshot()?;
+    /// 本 scoop 持久化 → COW 发布 → 替换对应读者快照
+    fn commit(&mut self, scoop: Scoop) -> Result<(), ServiceError> {
+        self.stores.persist(scoop)?;
+        let snap = self.stores.snapshot(scoop)?;
         snap.index.prepare();
-        *self.snapshot.write().expect("快照锁中毒") = Arc::new(snap);
+        *self.snapshots[&scoop].write().expect("快照锁中毒") = Arc::new(snap);
         Ok(())
     }
 }
