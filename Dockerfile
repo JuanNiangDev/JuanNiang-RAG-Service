@@ -4,26 +4,34 @@
 # 说明：
 # - llama.cpp 由构建脚本编译 C++ 源码，需要 cmake + make + C++ 编译器 + OpenBLAS；
 #   bindgen 生成 FFI 绑定还需 libclang（见下方 LIBCLANG_PATH）
+# - ort（ONNX 后端）默认 download-binaries：构建期从 cdn.pyke.io 拉取预编译
+#   ONNX Runtime 静态库（~10MB，rustls 下载，无需系统 OpenSSL），静态链接进
+#   二进制 → 运行镜像零额外依赖；构建机需能访问 cdn.pyke.io（国内可达）
+# - tokenizers 的 onig 后端为 vendored C 源码，由 cc 编译（仅需 g++）
 # - 首次构建 5-20 分钟属正常；依赖层已独立缓存，改业务代码只增量编译
-# - 基础镜像使用国内加速域名（docker.jiaxin.site/library/ 对应 Docker Hub 官方镜像）
-FROM docker.jiaxin.site/library/rust:1-slim-bookworm AS builder
+# - 基础镜像直接用 Docker Hub 官方镜像（daemon 已配 registry mirror）
+# 基底用 trixie 而非 bookworm：pyke 预编译 ort 静态库引用 glibc≥2.38（__isoc23_*）
+# 与 gcc≥13 libstdc++（_M_replace_cold），bookworm（glibc 2.36/gcc12）链接失败
+FROM rust:1-slim-trixie AS builder
 
-# 国内镜像加速：apt 换清华源，cargo 换清华 sparse 源
-RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' \
+# 国内镜像加速：apt 换 USTC https 源，cargo 换清华 sparse 源
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.ustc.edu.cn/debian|g' \
         /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
+    && printf 'Acquire::Retries "8";\n' > /etc/apt/apt.conf.d/80-retries \
     && mkdir -p "$CARGO_HOME" \
     && printf '[source.crates-io]\nreplace-with = "tuna"\n\n[source.tuna]\nregistry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"\n' > "$CARGO_HOME/config.toml" \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    && apt-get update \
+    && for i in 1 2 3 4 5; do apt-get install -y --no-install-recommends \
         cmake \
         make \
         g++ \
         pkg-config \
         libopenblas-dev \
-        libclang-dev \
+        libclang-dev && s=0 && break || s=1; echo "apt retry $i"; sleep 8; done && [ "$s" = 0 ] \
     && rm -rf /var/lib/apt/lists/*
 
-# llama-cpp-sys-2 构建时用 bindgen 生成 FFI 绑定，必须能找到 libclang（bookworm 自带 LLVM 14）
-ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+# llama-cpp-sys-2 构建时用 bindgen 生成 FFI 绑定，必须能找到 libclang（trixie 自带 LLVM 19）
+ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
 
 # 固定可移植 CPU 基线（x86-64-v2 = SSE2~SSE4.2/POPCNT，不含 AVX/AVX2/FMA/AVX512）。
 # 原因：llama-cpp-sys-2 的 build.rs 只按 RUSTFLAGS 的 target-cpu 决定 GGML_NATIVE，
@@ -76,19 +84,24 @@ RUN LC_ALL=C grep -a -q "RAG-Service 启动于" target/release/JuanNiang-RAG-Ser
 # ========== 运行阶段 ==========
 # 说明：
 # - 模型随镜像分发：构建时从上下文 models/ 拷入（需先准备模型，
-#   可用 scripts/download_model.py 从魔搭社区下载）；
+#   可用 scripts/download_model.py 从魔搭社区下载；bge 与 granite 可共存，
+#   只下载 granite 时镜像也能以 RAG_BACKEND=onnx 运行）；
 #   运行时仍可挂载卷覆盖 /app/models
 # - 数据目录 /app/data 建议挂载卷持久化
+# - ONNX Runtime 与 llama.cpp 均为静态/随二进制分发，运行镜像无需额外推理库
 # - 基础镜像使用国内加速域名
-FROM docker.jiaxin.site/library/debian:bookworm-slim AS runtime
+# runtime 同 trixie：与 builder glibc/libstdc++ 匹配
+FROM debian:trixie-slim AS runtime
 
-# 国内镜像加速：apt 换清华源
-RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' \
+# 国内镜像加速：apt 换 USTC https 源
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.ustc.edu.cn/debian|g' \
         /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    && printf 'Acquire::Retries "8";\n' > /etc/apt/apt.conf.d/80-retries \
+    && apt-get update \
+    && for i in 1 2 3 4 5; do apt-get install -y --no-install-recommends \
         libopenblas0 \
         libgomp1 \
-        wget \
+        wget && s=0 && break || s=1; echo "apt retry $i"; sleep 8; done && [ "$s" = 0 ] \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -101,7 +114,14 @@ RUN mkdir -p /app/data
 USER root
 
 # 服务配置（可用环境变量覆盖，见 src/config.rs）
-ENV RAG_MODEL_PATH=/app/models/bge-small-zh-v1.5-q8_0.gguf \
+# RAG_BACKEND=gguf|onnx 运行时切换嵌入后端（默认 gguf 向后兼容）：
+# - gguf：llama.cpp + bge（RAG_MODEL_PATH），查询自动加 bge 指令前缀
+# - onnx：ort CPU + granite（RAG_ONNX_MODEL_PATH / RAG_ONNX_TOKENIZER_PATH），
+#   384 维；切换后端后旧索引维度不匹配会启动报错（数据目录需重建）
+ENV RAG_BACKEND=gguf \
+    RAG_MODEL_PATH=/app/models/bge-small-zh-v1.5-q8_0.gguf \
+    RAG_ONNX_MODEL_PATH=/app/models/granite/model.onnx \
+    RAG_ONNX_TOKENIZER_PATH=/app/models/granite/tokenizer.json \
     RAG_DATA_DIR=/app/data \
     RAG_HOST=0.0.0.0 \
     RAG_PORT=3000 \

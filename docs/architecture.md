@@ -44,17 +44,18 @@ flowchart TD
         P[(plugin<br/>index.tvim + tags.bin)]
     end
     SS -->|本分库双快照 rename| 分库层
-    subgraph 推理[推理层]
+    subgraph 推理[推理层 · RAG_BACKEND=gguf|onnx]
         EMB[embedding.rs Embedder<br/>专属线程+channel]
-        EMB --> LLM[llama.cpp<br/>bge-small-zh-v1.5 Q8_0]
+        EMB -->|gguf| LLM[llama.cpp<br/>bge-small-zh-v1.5 Q8_0<br/>512 维，查询加指令前缀]
+        EMB -->|onnx| ORT[ort CPU（静态链接）<br/>granite-embedding-97m-multilingual-r2<br/>384 维，CLS 池化，逐条推理]
     end
 ```
 
 | 组件 | 文件 | 职责 |
 |---|---|---|
-| 入口 | `main.rs` | 配置 → `StoreSet::load`（扫描分库目录）→ 写者 → HTTP |
-| 配置 | `config.rs` | 全部环境变量注入，带默认值；`data_dir` 为数据根目录 |
-| 推理 | `embedding.rs` | 专属线程持有 `LlamaModel+LlamaContext`，channel 收发请求；批量打包、截断、归一化、预热、降级模式 |
+| 入口 | `main.rs` | 配置 → 嵌入线程（阻塞等首次加载拿模型维度）→ `StoreSet::load`（扫描分库目录 + 维度校验）→ 写者 → HTTP |
+| 配置 | `config.rs` | 全部环境变量注入，带默认值；`data_dir` 为数据根目录；`Backend` 枚举（gguf/onnx） |
+| 推理 | `embedding.rs` | 双后端（`run_gguf` / `run_onnx`）共用专属线程 + channel：gguf 批量打包 encode；onnx 逐条推理 + CLS 池化；截断、归一化、预热、降级模式 |
 | 分块 | `chunker.rs` | 字符窗口 + 句子边界回退 + 重叠（纯函数） |
 | 索引 | `vector_index.rs` | `IdMapIndex` 封装：检索（按相似度降序）、删除、COW 序列化往返拷贝 |
 | 存储 | `store.rs` | `Scoop` 白名单 + `StoreSet`（多分库）+ `TagStore` + tag 归属注册表；每库双快照原子持久化、损坏自愈重建 |
@@ -176,6 +177,9 @@ stores.delete(scoop, tag, 归属校验) → persist(scoop) → snapshot(scoop, C
 | 持久化先于发布 | 读者永远不见未落盘数据，崩溃一致性清晰 |
 | `n_ubatch=2048` | llama.cpp encoder 断言 `n_ubatch >= n_tokens`，且 `n_seq_max=16` 会把 `n_ctx` 向上取整到 4096（截断必须用模型原生长度而非 `ctx.n_ctx()`） |
 | 分数语义 | turbovec 返回相似度而非距离（实测相同向量 0.997），排序/映射按此实现 |
+| 嵌入后端运行时开关（gguf\|onnx），默认 gguf | granite（onnx-community r2 导出，int8）以 384 维 + 32K 上下文提供更强的多语检索（MTEB 60.3 vs bge），但存量 bge 索引（512 维）须保持可用；`RAG_BACKEND` 环境变量二选一，互不依赖 |
+| 索引维度随模型派生，不做配置 | 维度是模型属性（bge=512 / granite=384，从实际输出/图输出读取），写死在配置里迟早与模型脱节；启动期用模型维度建空库并校验旧索引，不匹配明确报错而非静默错乱 |
+| onnx 后端逐条推理，不做批内打包 | model_int8 的动态 int8 激活量化按整个张量求 scale，批组成（批大小/填充长度）会改变输出（实测同文本 批内 vs 单条 cos≈0.984）；逐条推理保证同文本永远得到逐位一致的向量，代价可接受（260 字 ≈ 33ms @4 线程） |
 
 ## 7. 性能特性（实测，8 核 CPU + OpenBLAS）
 

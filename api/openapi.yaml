@@ -10,7 +10,9 @@ info:
     - 同一 tag 全局唯一归属一个分库，跨分库写入/删除 → 409
     - 查询与写入互不阻塞；写接口返回即持久化完成（读己之写）
     - 分数 `score` 为相似度（0~1），越高越相似
-  version: 2.0.0
+    - 嵌入后端由 `RAG_BACKEND` 运行时选择：`gguf`（llama.cpp + bge，512 维）或
+      `onnx`（ort CPU + granite，384 维）；维度随模型派生，旧索引维度不匹配启动报错
+  version: 2.1.0
   contact:
     name: JuanNiang-Neo
   license:
@@ -195,6 +197,46 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /embeddings:
+    post:
+      tags: [ops]
+      summary: 文本嵌入（诊断）
+      description: |
+        对一批文本直接做嵌入并返回归一化向量，不落库、不影响检索。
+        与检索/入库共用同一条嵌入管线，用于诊断维度、一致性与延迟。
+        - 维度随模型派生：bge-small-zh-v1.5（gguf 后端）= 512，
+          granite-embedding-97m-multilingual-r2（onnx 后端）= 384
+        - `is_query` 仅 gguf 后端生效（bge 查询指令前缀）；granite 无查询指令，忽略
+        - 相同文本相同请求两次调用结果逐位一致
+      operationId: embedTexts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingsRequest'
+            example:
+              texts:
+                - 知识库检索服务测试句子。
+              is_query: false
+      responses:
+        '200':
+          description: 嵌入完成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingsResponse'
+              example:
+                backend: onnx
+                dim: 384
+                embeddings:
+                  - [0.012, -0.083, '…（共 384 个分量）']
+                truncated: [false]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /scoops/{scoop}/tags/batch:
     post:
       tags: [scoops]
@@ -324,11 +366,12 @@ paths:
                 status: ok
                 model:
                   ready: true
-                  model_name: bge-small-zh-v1.5
-                  dim: 512
-                  n_params: 23691264
+                  backend: onnx
+                  model_name: granite/model
+                  dim: 384
+                  n_params: null
                   n_threads: 4
-                  n_ctx: 4096
+                  n_ctx: 512
                   error: null
                 memory:
                   rss_kb: 81244
@@ -572,24 +615,29 @@ components:
 
     EmbedderInfo:
       type: object
-      required: [ready, model_name, dim, n_params, n_threads, n_ctx, error]
+      required: [ready, backend, model_name, dim, n_params, n_threads, n_ctx, error]
       properties:
         ready:
           type: boolean
           description: 模型是否加载成功、可服务
+        backend:
+          type: string
+          nullable: true
+          enum: [gguf, onnx, null]
+          description: 嵌入后端（RAG_BACKEND 配置）；未就绪时为 null
         model_name:
           type: string
           nullable: true
-          description: GGUF 元数据里的模型名
+          description: 模型名（gguf 取 GGUF 元数据；onnx 为 "父目录/文件名"）
         dim:
           type: integer
           nullable: true
-          description: 嵌入维度（bge-small-zh-v1.5 = 512）
+          description: 嵌入维度，随模型派生（bge-small-zh-v1.5 = 512，granite-embedding-97m-multilingual-r2 = 384）
         n_params:
           type: integer
           nullable: true
           format: int64
-          description: 模型参数量
+          description: 模型参数量（onnx 后端为 null）
         n_threads:
           type: integer
           nullable: true
@@ -597,11 +645,49 @@ components:
         n_ctx:
           type: integer
           nullable: true
-          description: 实际上下文长度（llama.cpp 可能因多序列配置向上取整）
+          description: gguf 为实际上下文长度（llama.cpp 可能向上取整）；onnx 为单条文本 token 截断上限
         error:
           type: string
           nullable: true
           description: null 表示正常；否则为加载/初始化失败原因
+
+    EmbeddingsRequest:
+      type: object
+      required: [texts]
+      properties:
+        texts:
+          type: array
+          items:
+            type: string
+          description: 待嵌入文本列表（不可为空，元素不可为空白）
+        is_query:
+          type: boolean
+          default: false
+          description: 检索查询语义；仅 gguf 后端生效（bge 查询指令前缀），granite 忽略
+
+    EmbeddingsResponse:
+      type: object
+      required: [backend, dim, embeddings, truncated]
+      properties:
+        backend:
+          type: string
+          description: 实际执行推理的后端（gguf | onnx）
+        dim:
+          type: integer
+          description: 向量维度（随模型派生：bge=512 / granite=384）
+        embeddings:
+          type: array
+          description: 归一化向量（L2，模长 ≈ 1），顺序与请求一致
+          items:
+            type: array
+            items:
+              type: number
+              format: float
+        truncated:
+          type: array
+          description: 每条文本是否被截断（超出 n_ctx 上限）
+          items:
+            type: boolean
 
     MemoryInfo:
       type: object

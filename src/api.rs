@@ -58,6 +58,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/scoops/{scoop}/tags/batch", post(batch_upsert))
         .route("/scoops/{scoop}/tags/batch-delete", post(batch_delete))
         .route("/scoops/{scoop}/tags/search", get(search))
+        .route("/embeddings", post(embeddings))
         .with_state(state)
         // HTTP 请求指标（请求数/耗时，path 用路由模板保持低基数）
         .layer(axum::middleware::from_fn(crate::metrics::http_metrics))
@@ -145,6 +146,26 @@ pub struct SearchParams {
     pub k: usize,
     #[serde(default)]
     pub min_score: Option<f32>,
+}
+
+/// POST /embeddings 请求：直接对一批文本做嵌入（诊断/联调用，不落库）
+#[derive(Deserialize)]
+pub struct EmbeddingsRequest {
+    pub texts: Vec<String>,
+    /// 检索查询语义；仅 gguf 后端生效（bge 查询前缀），granite 无查询指令，忽略
+    #[serde(default)]
+    pub is_query: bool,
+}
+
+#[derive(Serialize)]
+pub struct EmbeddingsResponse {
+    /// 后端标识（gguf | onnx）
+    pub backend: &'static str,
+    /// 向量维度（随模型派生：bge=512 / granite=384）
+    pub dim: usize,
+    pub embeddings: Vec<Vec<f32>>,
+    /// 每条文本是否被截断（超出 n_ctx 上限）
+    pub truncated: Vec<bool>,
 }
 
 fn default_k() -> usize {
@@ -359,6 +380,29 @@ async fn search(
         .with_label_values(&[scoop.as_str()])
         .observe(results.len() as f64);
     Ok(Json(SearchResponse { results }))
+}
+
+/// POST /embeddings：直接嵌入一批文本并返回向量（诊断/联调用，不落库）。
+/// 与检索共用同一条嵌入管线（归一化/截断一致）；诊断用途不写查询 LRU 缓存。
+async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<EmbeddingsRequest>,
+) -> Result<Json<EmbeddingsResponse>, AppError> {
+    if body.texts.is_empty() {
+        return Err(AppError::bad_request("texts 不能为空"));
+    }
+    if body.texts.iter().any(|t| t.trim().is_empty()) {
+        return Err(AppError::bad_request("texts 不能包含空白文本"));
+    }
+    let (vectors, truncated) = state.embedder.embed(body.texts, body.is_query).await?;
+    // 后端/维度从嵌入线程状态读取（与实际执行推理的模型一致）
+    let info = state.embedder.info().await;
+    Ok(Json(EmbeddingsResponse {
+        backend: info.backend.unwrap_or("unknown"),
+        dim: vectors.first().map_or(0, Vec::len),
+        embeddings: vectors,
+        truncated,
+    }))
 }
 
 async fn delete_tag(

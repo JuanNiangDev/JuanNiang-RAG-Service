@@ -38,6 +38,17 @@ pub enum StoreError {
     TagNotFound(Uuid),
     #[error("tag {0} 同时归属分库 {1} 与 {2}（数据损坏），拒绝恢复：请人工核查两个分库的 tags.bin")]
     TagMultiScoop(Uuid, Scoop, Scoop),
+    #[error("无法确定向量索引维度（{0}）：请确认嵌入模型已成功加载（/info 查看），或数据是否完整")]
+    DimUnknown(String),
+    #[error(
+        "分库 {scoop} 的索引维度 {index_dim} 与当前模型输出维度 {model_dim} 不匹配：该索引由其他嵌入模型生成，请切回原 RAG_BACKEND，或备份后清空 {dir} 重建"
+    )]
+    IndexDimMismatch {
+        scoop: Scoop,
+        index_dim: usize,
+        model_dim: usize,
+        dir: String,
+    },
     #[error("未知分库: {0}（白名单: {1}）")]
     UnknownScoop(String, &'static str),
     #[error("tag {0} 已归属分库 {1}，跨分库重复写入被拒绝")]
@@ -153,17 +164,46 @@ pub struct TagStore {
     data_dir: PathBuf,
 }
 
+/// 索引缺失/损坏时的占位空索引：维度优先从原始向量推导（自愈真源），
+/// 无原始向量时回退模型维度；两者都不可用则明确报错（绝不猜维度）。
+fn placeholder_index(
+    raw_vectors: &HashMap<u64, Vec<f32>>,
+    model_dim: Option<usize>,
+    bit_width: usize,
+) -> Result<VectorIndex, StoreError> {
+    let dim = raw_vectors
+        .values()
+        .next()
+        .map(|v| v.len())
+        .or(model_dim)
+        .ok_or_else(|| {
+            StoreError::DimUnknown(
+                "index.tvim 缺失/损坏且 tags.bin 无原始向量，模型也未加载成功".into(),
+            )
+        })?;
+    VectorIndex::new(dim, bit_width).map_err(StoreError::Vector)
+}
+
 impl TagStore {
-    /// 从磁盘加载单个 scoop；无数据则返回空库
-    pub fn load(config: &Config, scoop: Scoop) -> Result<Self, StoreError> {
+    /// 从磁盘加载单个 scoop；无数据则用模型维度建空库。
+    /// `model_dim` 来自嵌入线程的实际输出（维度随模型派生，不写死）：
+    /// 为 None（模型加载失败）时只能加载已有数据，无法凭空建索引。
+    pub fn load(
+        config: &Config,
+        model_dim: Option<usize>,
+        scoop: Scoop,
+    ) -> Result<Self, StoreError> {
         let data_dir = scoop_dir(&config.data_dir, scoop);
         let tags_path = data_dir.join("tags.bin");
         let index_path = data_dir.join("index.tvim");
 
         let mut store = if tags_path.exists() {
-            Self::load_tags(&tags_path, &index_path, config, scoop)?
+            Self::load_tags(&tags_path, &index_path, config, model_dim, scoop)?
         } else {
-            Self::empty(config, scoop)?
+            let dim = model_dim.ok_or_else(|| {
+                StoreError::DimUnknown(format!("分库 {scoop} 为空库且嵌入模型未加载成功"))
+            })?;
+            Self::empty(config, dim, scoop)?
         };
         // 自愈：块数不一致 → 从原始向量重建索引
         let expected: usize = store.tag_to_ids.values().map(|v| v.len()).sum();
@@ -183,6 +223,7 @@ impl TagStore {
         tags_path: &Path,
         index_path: &Path,
         config: &Config,
+        model_dim: Option<usize>,
         scoop: Scoop,
     ) -> Result<Self, StoreError> {
         let bytes = std::fs::read(tags_path).map_err(|e| StoreError::Io(e.to_string()))?;
@@ -190,12 +231,16 @@ impl TagStore {
             bincode::deserialize(&bytes).map_err(|e| StoreError::Deserialize(e.to_string()))?;
 
         let index = if index_path.exists() {
-            VectorIndex::load(index_path).unwrap_or_else(|e| {
-                info!("index.tvim 加载失败（{e}），稍后由一致性校验触发重建");
-                VectorIndex::new(config.dim, config.bit_width).expect("构造空索引失败")
-            })
+            match VectorIndex::load(index_path) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    info!("index.tvim 加载失败（{e}），稍后由一致性校验触发重建");
+                    placeholder_index(&f.raw_vectors, model_dim, config.bit_width)?
+                }
+            }
         } else {
-            VectorIndex::new(config.dim, config.bit_width).expect("构造空索引失败")
+            info!("index.tvim 缺失，稍后由一致性校验触发重建");
+            placeholder_index(&f.raw_vectors, model_dim, config.bit_width)?
         };
 
         Ok(Self {
@@ -208,15 +253,20 @@ impl TagStore {
         })
     }
 
-    fn empty(config: &Config, scoop: Scoop) -> Result<Self, StoreError> {
+    fn empty(config: &Config, dim: usize, scoop: Scoop) -> Result<Self, StoreError> {
         Ok(Self {
-            index: VectorIndex::new(config.dim, config.bit_width).map_err(StoreError::Vector)?,
+            index: VectorIndex::new(dim, config.bit_width).map_err(StoreError::Vector)?,
             tag_to_ids: HashMap::new(),
             next_id: 0,
             raw_vectors: HashMap::new(),
             keep_raw: config.store_raw_vectors,
             data_dir: scoop_dir(&config.data_dir, scoop),
         })
+    }
+
+    /// 索引维度（启动期与模型维度校验用）
+    pub fn dim(&self) -> usize {
+        self.index.dim()
     }
 
     /// 从原始向量全量重建索引
@@ -369,7 +419,12 @@ impl StoreSet {
     /// 从磁盘加载全部分库：扫描 scoops/ 目录只加载白名单内 scoop，
     /// 白名单中缺失的分库初始化为空库（全新部署 / 局部删除后自动补齐）。
     /// 未知目录告警跳过（防旧版本遗留脏数据混入）。
-    pub fn load(config: &Config) -> Result<Self, StoreError> {
+    ///
+    /// `model_dim`：嵌入模型的实际输出维度（随模型派生，bge=512 / granite=384）。
+    /// - 空库创建必须依赖它（模型未加载时无法建索引 → 明确报错）；
+    /// - 已有索引的维度来自 .tvim 文件本身，与模型不一致时启动即报错，
+    ///   绝不允许 512 维旧索引静默混入 384 维新向量。
+    pub fn load(config: &Config, model_dim: Option<usize>) -> Result<Self, StoreError> {
         let mut stores = HashMap::new();
         let base = PathBuf::from(&config.data_dir).join("scoops");
         match std::fs::read_dir(&base) {
@@ -380,7 +435,7 @@ impl StoreSet {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     match Scoop::from_str(&name) {
                         Ok(scoop) => {
-                            let store = TagStore::load(config, scoop)?;
+                            let store = TagStore::load(config, model_dim, scoop)?;
                             stores.entry(scoop).or_insert(store);
                         }
                         Err(_) if entry.path().is_dir() => {
@@ -396,9 +451,31 @@ impl StoreSet {
             Err(e) => return Err(StoreError::Io(format!("扫描分库目录失败: {e}"))),
         }
         for scoop in Scoop::ALL {
-            stores
-                .entry(scoop)
-                .or_insert_with(|| TagStore::empty(config, scoop).expect("构造空分库失败"));
+            if let std::collections::hash_map::Entry::Vacant(e) = stores.entry(scoop) {
+                let dim = model_dim.ok_or_else(|| {
+                    StoreError::DimUnknown(format!("分库 {scoop} 为空库且嵌入模型未加载成功"))
+                })?;
+                e.insert(TagStore::empty(config, dim, scoop)?);
+            }
+        }
+
+        // 维度一致性校验：旧索引维度必须与当前模型一致（确定性顺序）
+        if let Some(md) = model_dim {
+            for scoop in Scoop::ALL {
+                if let Some(store) = stores.get(&scoop) {
+                    let idx_dim = store.dim();
+                    if idx_dim != md {
+                        return Err(StoreError::IndexDimMismatch {
+                            scoop,
+                            index_dim: idx_dim,
+                            model_dim: md,
+                            dir: scoop_dir(&config.data_dir, scoop)
+                                .to_string_lossy()
+                                .into_owned(),
+                        });
+                    }
+                }
+            }
         }
 
         let mut set = Self {
@@ -506,12 +583,12 @@ mod tests {
             port: 0,
             n_threads: 4,
             n_ctx: 512,
-            dim: 8, // 测试用小维度（8 的倍数）
             bit_width: 4,
             max_chunk_chars: 260,
             overlap_chars: 50,
             store_raw_vectors: true,
             lru_capacity: 128,
+            ..Default::default()
         }
     }
 
@@ -526,7 +603,7 @@ mod tests {
     fn upsert_delete_snapshot_cycle() {
         let dir = std::env::temp_dir().join(format!("rag_test_{}", Uuid::new_v4()));
         let cfg = test_config(&dir);
-        let mut store = TagStore::empty(&cfg, Scoop::Knowledge).unwrap();
+        let mut store = TagStore::empty(&cfg, 8, Scoop::Knowledge).unwrap();
         let tag = Uuid::new_v4();
 
         let n = store
@@ -556,7 +633,7 @@ mod tests {
         // 持久化 + 重新加载
         store.persist().unwrap();
         drop(store);
-        let mut reloaded = TagStore::load(&cfg, Scoop::Knowledge).unwrap();
+        let mut reloaded = TagStore::load(&cfg, Some(8), Scoop::Knowledge).unwrap();
         assert_eq!(reloaded.tag_count(), 1);
         assert_eq!(reloaded.chunk_count(), 1);
         assert_eq!(reloaded.next_id, 3, "两次 upsert 共分配了 3 个 id");
@@ -571,7 +648,7 @@ mod tests {
     fn load_missing_data_returns_empty() {
         let dir = std::env::temp_dir().join(format!("rag_missing_{}", Uuid::new_v4()));
         let cfg = test_config(&dir);
-        let store = TagStore::load(&cfg, Scoop::Memory).unwrap();
+        let store = TagStore::load(&cfg, Some(8), Scoop::Memory).unwrap();
         assert_eq!(store.tag_count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -580,7 +657,7 @@ mod tests {
     fn rebuild_when_index_missing() {
         let dir = std::env::temp_dir().join(format!("rag_rebuild_{}", Uuid::new_v4()));
         let cfg = test_config(&dir);
-        let mut store = TagStore::empty(&cfg, Scoop::Knowledge).unwrap();
+        let mut store = TagStore::empty(&cfg, 8, Scoop::Knowledge).unwrap();
         store
             .upsert(Uuid::new_v4(), &["内容".into()], &[fake_vector(8, 0.3)])
             .unwrap();
@@ -590,8 +667,41 @@ mod tests {
         std::fs::remove_file(dir.join("scoops/knowledge/index.tvim")).unwrap();
 
         // load 应触发自愈重建
-        let reloaded = TagStore::load(&cfg, Scoop::Knowledge).unwrap();
+        let reloaded = TagStore::load(&cfg, Some(8), Scoop::Knowledge).unwrap();
         assert_eq!(reloaded.chunk_count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 旧索引维度与当前模型维度不一致：启动必须明确报错（绝不静默混入）。
+    #[test]
+    fn dim_mismatch_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("rag_dim_{}", Uuid::new_v4()));
+        let cfg = test_config(&dir);
+        let mut store = TagStore::empty(&cfg, 8, Scoop::Knowledge).unwrap();
+        store
+            .upsert(Uuid::new_v4(), &["内容".into()], &[fake_vector(8, 0.3)])
+            .unwrap();
+        store.persist().unwrap();
+        drop(store);
+
+        // 以 16 维模型启动：8 维旧索引必须被拒绝，错误含两侧维度与分库
+        let err = match StoreSet::load(&cfg, Some(16)) {
+            Ok(_) => panic!("维度不匹配的旧索引不应加载成功"),
+            Err(e) => e,
+        };
+        match err {
+            StoreError::IndexDimMismatch {
+                scoop,
+                index_dim,
+                model_dim,
+                ..
+            } => {
+                assert_eq!(scoop, Scoop::Knowledge);
+                assert_eq!(index_dim, 8);
+                assert_eq!(model_dim, 16);
+            }
+            other => panic!("期望 IndexDimMismatch，实际: {other}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -615,7 +725,7 @@ mod tests {
     fn store_set_isolates_scoops() {
         let dir = std::env::temp_dir().join(format!("rag_set_{}", Uuid::new_v4()));
         let cfg = test_config(&dir);
-        let mut set = StoreSet::load(&cfg).unwrap();
+        let mut set = StoreSet::load(&cfg, Some(8)).unwrap();
 
         // 四个 scoop 全部就绪（空库补齐）
         let stats = set.scoop_stats();
@@ -682,7 +792,7 @@ mod tests {
         // 手工向两个分库目录写入同一 tag 的 tags.bin
         let tag = Uuid::new_v4();
         for scoop in [Scoop::Knowledge, Scoop::Memory] {
-            let mut store = TagStore::empty(&cfg, scoop).unwrap();
+            let mut store = TagStore::empty(&cfg, 8, scoop).unwrap();
             store
                 .upsert(tag, &["内容".into()], &[fake_vector(8, 0.5)])
                 .unwrap();
@@ -690,7 +800,7 @@ mod tests {
         }
 
         // 加载必须失败，且错误携带两个冲突分库名
-        let err = match StoreSet::load(&cfg) {
+        let err = match StoreSet::load(&cfg, Some(8)) {
             Ok(_) => panic!("损坏数据不应加载成功"),
             Err(e) => e,
         };
@@ -713,7 +823,7 @@ mod tests {
         let cfg = test_config(&dir);
         std::fs::create_dir_all(dir.join("scoops/legacy_old")).unwrap();
 
-        let set = StoreSet::load(&cfg).unwrap();
+        let set = StoreSet::load(&cfg, Some(8)).unwrap();
         // 未知目录不加载、不报错；白名单全部分库就绪
         assert_eq!(set.scoop_stats().len(), Scoop::ALL.len());
         let _ = std::fs::remove_dir_all(&dir);

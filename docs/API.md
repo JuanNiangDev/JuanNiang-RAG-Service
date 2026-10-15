@@ -20,6 +20,7 @@
 - [DELETE /scoops/{scoop}/tags/{tag} —— 删除](#delete-scoopsscooptagstag--删除)
 - [GET /health —— 健康检查](#get-health--健康检查)
 - [GET /info —— 服务信息](#get-info--服务信息)
+- [POST /embeddings —— 文本嵌入（诊断）](#post-embeddings--文本嵌入诊断)
 - [示例：完整流程](#示例完整流程)
 - [行为边界与注意事项](#行为边界与注意事项)
 
@@ -380,11 +381,12 @@ GET /info
   "status": "ok",
   "model": {
     "ready": true,
-    "model_name": "bge-small-zh-v1.5",
-    "dim": 512,
-    "n_params": 23691264,
+    "backend": "onnx",
+    "model_name": "granite/model",
+    "dim": 384,
+    "n_params": null,
     "n_threads": 4,
-    "n_ctx": 4096,
+    "n_ctx": 512,
     "error": null
   },
   "memory": {
@@ -403,11 +405,12 @@ GET /info
 | 字段 | 说明 |
 |---|---|
 | `model.ready` | 模型是否加载成功、可服务。`false` 时查看 `model.error` 获取失败原因 |
-| `model.model_name` | GGUF 元数据里的模型名 |
-| `model.dim` | 嵌入维度（bge-small-zh-v1.5 = 512） |
-| `model.n_params` | 模型参数量 |
+| `model.backend` | 嵌入后端（`gguf` \| `onnx`，配置 `RAG_BACKEND`）；未就绪时 `null` |
+| `model.model_name` | gguf 取 GGUF 元数据模型名；onnx 为「父目录/文件名」 |
+| `model.dim` | 嵌入维度，随模型派生（bge = 512，granite = 384） |
+| `model.n_params` | 模型参数量（onnx 后端为 `null`） |
 | `model.n_threads` | 推理线程数（配置 `RAG_N_THREADS`） |
-| `model.n_ctx` | 实际上下文长度（llama.cpp 可能因多序列配置向上取整，如实上报） |
+| `model.n_ctx` | gguf 为实际上下文长度（llama.cpp 可能向上取整，如实上报）；onnx 为单条文本 token 截断上限 |
 | `model.error` | `null` 表示正常；否则为加载/初始化失败原因 |
 | `memory.rss_kb` | 进程常驻物理内存（kB）。仅 Linux（读 `/proc/self/status`），其他平台为 `null` |
 | `memory.vsize_kb` | 进程虚拟内存（kB） |
@@ -424,6 +427,51 @@ curl localhost:3000/info
 - 监控：`memory.rss_kb` 随库规模线性增长，可据此设定告警阈值
 - 体检：入库前确认 `model.ready == true`，避免写入返回 500
 - 对账：`scoops.<name>.chunks` 应与 Agent 侧该集合文档数 × 平均块数匹配
+
+---
+
+## POST /embeddings —— 文本嵌入（诊断）
+
+对一批文本直接做嵌入并返回归一化向量：不落库、不影响检索、不写查询缓存。
+与检索/入库共用同一条嵌入管线，用于诊断维度、一致性与延迟。
+
+```
+POST /embeddings
+Content-Type: application/json
+
+{ "texts": ["知识库检索服务测试句子。", "另一条文本"], "is_query": false }
+```
+
+**响应 200**：
+
+```json
+{
+  "backend": "onnx",
+  "dim": 384,
+  "embeddings": [
+    [0.012, -0.083, "...（共 384 个分量）"],
+    [0.031, 0.004,  "...（共 384 个分量）"]
+  ],
+  "truncated": [false, false]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `backend` | 实际执行推理的后端（`gguf` \| `onnx`，由 `RAG_BACKEND` 配置） |
+| `dim` | 向量维度，随模型派生：bge-small-zh-v1.5（gguf）= 512，granite-embedding-97m-multilingual-r2（onnx）= 384 |
+| `embeddings` | L2 归一化向量（模长 ≈ 1），顺序与请求一致；相同文本两次调用结果逐位一致 |
+| `truncated` | 每条文本是否超出 `RAG_N_CTX` 截断上限 |
+
+- `is_query` 仅 gguf 后端生效（bge 检索查询需加指令前缀）；granite 无查询指令，忽略该参数。
+- 错误：`400`（texts 为空/含空白）、`500`（模型未就绪，见 `GET /info` 的 `model.error`）。
+
+**curl 示例**：
+
+```sh
+curl -s localhost:3000/embeddings -H 'content-type: application/json' \
+     -d '{"texts":["你好"]}' | python3 -m json.tool | head -5
+```
 
 ---
 

@@ -15,7 +15,7 @@ MODEL_ID   ?= gubanjie/bge-small-zh-v1.5-q8_0.gguf
 DEV_ENV := $(shell python3 -c 'import yaml; d = yaml.safe_load(open("$(DEV_YAML)")) or {}; print(" ".join(f"{k}={v}" for k, v in d.items()))' 2>/dev/null)
 
 .PHONY: help build build-release run check fmt fmt-check clippy \
-        test test-unit test-e2e bench api-lint api-preview clean
+        test test-unit test-e2e bench download download-onnx api-lint api-preview clean
 
 ## 构建与运行
 build: ## debug 构建
@@ -59,6 +59,9 @@ bench: ## 基准三件套（需要模型文件，无模型时自动跳过嵌入�
 
 download: ## 下载 bge 模型到 models/（默认魔搭 gubanjie/bge-small-zh-v1.5-q8_0.gguf，~25MB）
 	python3 scripts/download_model.py --model-id $(MODEL_ID) --output models
+
+download-onnx: ## 下载 granite ONNX 到 models/granite/（RAG_BACKEND=onnx 用，int8 ~98MB）
+	python3 scripts/download_model.py --preset granite --output models
 
 ## API 规范
 api-lint: ## 校验 OpenAPI 规范（redocly）

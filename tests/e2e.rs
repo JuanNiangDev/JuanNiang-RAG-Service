@@ -4,7 +4,7 @@
 //!       cargo test --test e2e -- --ignored
 
 use juan_niang_rag_service::config::Config;
-use juan_niang_rag_service::embedding::Embedder;
+use juan_niang_rag_service::embedding::{Embedder, EmbedderParams};
 use juan_niang_rag_service::search::aggregate;
 use juan_niang_rag_service::store::{Scoop, StoreSet};
 use juan_niang_rag_service::writer::Writer;
@@ -19,12 +19,12 @@ fn test_config(dir: &std::path::Path) -> Config {
         port: 0,
         n_threads: 4,
         n_ctx: 512,
-        dim: 512,
         bit_width: 4,
         max_chunk_chars: 260,
         overlap_chars: 50,
         store_raw_vectors: true,
         lru_capacity: 128,
+        ..Default::default()
     }
 }
 
@@ -35,8 +35,13 @@ async fn full_cycle() {
     let config = test_config(&dir);
     std::fs::create_dir_all(&config.data_dir).unwrap();
 
-    let embedder = Embedder::new(&config.model_path, config.n_threads, config.n_ctx);
-    let stores = StoreSet::load(&config).unwrap();
+    let embedder = Embedder::new(EmbedderParams {
+        gguf_model_path: config.model_path.clone(),
+        ..Default::default()
+    });
+    let model_info = embedder.wait_loaded();
+    assert!(model_info.ready, "模型应加载成功: {:?}", model_info.error);
+    let stores = StoreSet::load(&config, model_info.dim).unwrap();
     let writer = Writer::start(stores, embedder.clone(), config.clone());
 
     // 1. 长文 upsert（应触发服务端分块）；固定使用 knowledge 分库
@@ -72,7 +77,7 @@ async fn full_cycle() {
 
     // 5. 重启模拟：从磁盘恢复，状态一致
     drop(writer);
-    let stores2 = StoreSet::load(&config).unwrap();
+    let stores2 = StoreSet::load(&config, model_info.dim).unwrap();
     assert_eq!(stores2.scoop_stats()[0].1, 0);
     assert_eq!(stores2.scoop_stats()[0].2, 0);
 

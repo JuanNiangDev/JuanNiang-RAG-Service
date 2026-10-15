@@ -10,8 +10,18 @@
 
 # ---- 模型 ----
 
-# bge-small-zh-v1.5 Q8_0 GGUF 模型文件路径（~25MB）
+# 嵌入后端：gguf（llama.cpp + bge，默认，向后兼容）| onnx（ort CPU + granite）
+# 两个后端的维度随模型派生（bge=512 / granite=384）；切换后端后旧索引维度
+# 不匹配会启动报错，需换回或清空数据目录重建
+RAG_BACKEND: gguf
+
+# bge-small-zh-v1.5 Q8_0 GGUF 模型文件路径（~25MB，RAG_BACKEND=gguf 时使用）
 RAG_MODEL_PATH: models/bge-small-zh-v1.5-q8_0.gguf
+
+# granite-embedding-97m-multilingual-r2 ONNX（int8 量化 ~98MB）与分词器路径
+# （RAG_BACKEND=onnx 时使用；make download-onnx 下载到 models/granite/）
+RAG_ONNX_MODEL_PATH: models/granite/model.onnx
+RAG_ONNX_TOKENIZER_PATH: models/granite/tokenizer.json
 
 # ---- 存储 ----
 
@@ -32,15 +42,14 @@ RAG_PORT: 3000
 # llama.cpp 推理线程数（阶段 0 实测：8 核 CPU 上 4 最优，线程更多反而抢内存带宽）
 RAG_N_THREADS: 4
 
-# 上下文长度（bge-small-zh-v1.5 上限 512，超长文本由服务端分块处理）
+# 上下文长度（gguf: bge-v1.5 上限 512；onnx: 单条文本 token 截断上限）
 RAG_N_CTX: 512
 
 # ---- 向量索引 ----
 
-# 嵌入维度（bge-small-zh-v1.5 固定 512，需为 8 的倍数，改模型才需要动）
-RAG_DIM: 512
-
-# turbovec 量化位宽（可选 2/3/4，4 精度最高：512 维 ≈ 256B/向量）
+# turbovec 量化位宽（可选 2/3/4，4 精度最高）
+# 注意：嵌入维度（RAG_DIM）已移除——维度由加载的模型实时派生
+# （bge=512 / granite=384），与配置解耦
 RAG_BIT_WIDTH: 4
 
 # ---- 服务端分块 ----

@@ -21,6 +21,19 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"           # 错误类型 derive
 lru = "0.12"              # 查询 embedding 缓存
 prometheus = "0.14"       # Prometheus 指标（Grafana 采集 /metrics）
+ort = { version = "2.0.0-rc.14", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries", # 构建期从 cdn.pyke.io 拉取预编译 ONNX Runtime（静态链接，运行镜像零额外依赖）
+    "tls-rustls",        # 下载用 rustls（webpki 根证书，免系统 OpenSSL）
+    "copy-dylibs",
+    "api-31",
+] } # ONNX Runtime 绑定，granite CPU 推理
+tokenizers = { version = "0.23", default-features = false, features = [
+    "onig",
+    "esaxx_fast",
+] } # HuggingFace tokenizers，加载 granite tokenizer.json
 
 [dev-dependencies]
 rand = "0.8"              # 基准/测试合成数据

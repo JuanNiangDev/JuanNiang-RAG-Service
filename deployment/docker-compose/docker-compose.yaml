@@ -19,7 +19,10 @@ services:
       - "${RAG_HTTP_PORT:-3000}:3000"
     environment:
       # 容器内固定配置（宿主端口见 .env 的 RAG_HTTP_PORT）
+      RAG_BACKEND: ${RAG_BACKEND:-gguf}
       RAG_MODEL_PATH: /app/models/${RAG_MODEL_FILE:-bge-small-zh-v1.5-q8_0.gguf}
+      RAG_ONNX_MODEL_PATH: ${RAG_ONNX_MODEL_PATH:-/app/models/granite/model.onnx}
+      RAG_ONNX_TOKENIZER_PATH: ${RAG_ONNX_TOKENIZER_PATH:-/app/models/granite/tokenizer.json}
       RAG_DATA_DIR: /app/data
       RAG_HOST: 0.0.0.0
       RAG_PORT: 3000

@@ -26,6 +26,8 @@ target
 /target
 
 models/bge-small-zh-v1.5-q8_0.gguf
+# granite ONNX 模型目录（make download-onnx 下载，大文件不入库）
+models/granite/
 
 # 本地开发配置（模板为 dev.yaml.tmp，入库）
 /dev.yaml
